@@ -1,5 +1,5 @@
 ## Contextual Intelligence
-- **Remains Index**: SEMPRE consulte o arquivo `remains.MD` ao iniciar uma tarefa. Ele contém o índice das últimas 30 alterações críticas para garantir que você não cause regressões ou perca tempo lendo arquivos desatualizados.
+- **Task Index**: SEMPRE consulte o arquivo `tasks/todo.md` ao iniciar uma tarefa. Ele contém o índice das alterações planejadas e o progresso atual para garantir que você não cause regressões.
 
 ## Workflow Orchestration
 

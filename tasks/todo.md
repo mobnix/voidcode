@@ -1,40 +1,30 @@
-# 📟 voidcode-cli — Task Board
+# 📟 Missão: Purgação PulseWaveX & Promoção VoidCode
 
-## 🎯 Objetivo
-Criar um CLI Agentic (estilo Gemini/Claude Code) que utiliza a API da DeepSeek, com visual Matrix e arquitetura Clean Code.
+## 🎯 Objetivos
+- [x] Eliminar qualquer menção residual a "PulseWaveX" (Busca exaustiva).
+- [x] Refinar o `README.md` para refletir o estado atual do `voidcode`.
+- [x] Realizar o ciclo completo de Git: `dev` -> `master`.
 
----
+## 🛠️ Passo a Passo
 
-## 🛠️ Sprint 1: Fundação & UX Matrix
-- [ ] **Setup Inicial**
-    - [ ] `npm init` e configuração de TypeScript.
-    - [ ] Configuração do Vitest para TDD.
-    - [ ] Estrutura de pastas (src/core, src/cli, src/tools).
-- [ ] **The Wizard (Config)**
-    - [ ] Implementar Check de primeiro boot (existe `.env`?).
-    - [ ] Wizard interativo com `inquirer` para salvar `DEEPSEEK_API_KEY`.
-- [ ] **Visual Identity**
-    - [ ] Splash screen com `gradient-string` (Matrix Style).
-    - [ ] Spinners personalizados com `ora`.
+### Fase 1: Limpeza Extrema 🧹
+- [x] Executar busca por "pulsewavex" (case-insensitive) em todo o projeto.
+- [x] Revisar `GEMINI.md`, `memory.md`, `.env` e `tasks/`.
+- [x] Remover arquivos legados (`product.MD`, `remains.MD`).
 
-## 🧠 Sprint 2: O Cérebro (DeepSeek Agent)
-- [ ] **LLM Layer**
-    - [ ] Service de integração com DeepSeek API.
-    - [ ] Gestão de histórico de chat (Memory).
-- [ ] **Agentic Tools (Iniciais)**
-    - [ ] Tool: `ListFiles` (exploração).
-    - [ ] Tool: `ReadFile` (entendimento).
-    - [ ] Tool: `WriteFile` (escrita).
+### Fase 2: Documentação 📝
+- [x] Atualizar o `README.md` na raiz.
+- [x] Garantir que o `README.md` mencione as tecnologias corretas (DeepSeek, Node.js, etc.).
 
-## 🧪 Sprint 3: Validação & Segurança
-- [ ] Testes unitários de todos os serviços.
-- [ ] Implementar "Human-in-the-loop" (pedir permissão antes de rodar comandos).
+### Fase 3: Operações Git 🚀
+- [ ] `git status` para verificar alterações pendentes.
+- [ ] `git add .` e `git commit` com mensagem épica na `dev`.
+- [ ] `git push origin dev`.
+- [ ] `git checkout master`.
+- [ ] `git merge dev`.
+- [ ] `git push origin master`.
+- [ ] Voltar para a branch `dev`.
 
----
-
-## 📈 Progresso Atual
-- [x] Planejamento inicial concluído.
-- [x] Setup Inicial (Node/TS/Vitest).
-- [x] The Wizard (Configuração automática via terminal).
-- [x] Visual Identity (Matrix Splash Screen).
-- [ ] Implementação do Loop de Chat e Integração DeepSeek.
+## 🧪 Verificação
+- [x] Rodar `grep -ri "pulsewavex" .` e confirmar zero resultados.
+- [ ] Validar status das branches no GitHub.

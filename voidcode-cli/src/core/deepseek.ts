@@ -27,7 +27,8 @@ export class DeepSeekService {
       const response = await this.client.chat.completions.create({
         model: this.model,
         messages,
-        temperature: 0.1, // Temperatura baixa para mais precisão em ferramentas
+        temperature: 0.1,
+        max_tokens: 8192, // Aumentado para suportar respostas longas/múltiplas ferramentas
         stream: false,
         tools: tools,
         tool_choice: tools ? 'auto' : undefined

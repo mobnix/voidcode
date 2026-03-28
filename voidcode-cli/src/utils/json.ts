@@ -8,7 +8,8 @@ export function safeJSONParse(jsonStr: string): any {
     // Tenta reparar JSON truncado (aspas não fechadas, colchetes/chaves abertos)
     let repaired = jsonStr.trim();
 
-    // Se termina com vírgula ou caractere parcial, remove
+    // Remove trailing commas (inclusive antes de } ou ])
+    repaired = repaired.replace(/,\s*([\]}])/g, '$1');
     repaired = repaired.replace(/,$/, '');
 
     // Conta aberturas e fechamentos

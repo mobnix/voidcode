@@ -181,7 +181,7 @@ export class ChatLoop {
   private abortTask = false;
   private allTools: any[] = [];
   private allHandlers: Record<string, (args: any) => any> = {};
-  private readonly MAX_HISTORY_LENGTH = 20;
+  private readonly MAX_HISTORY_LENGTH = 15;
   private activeAgents: Map<string, { promise: Promise<string>; objective: string; startedAt: Date; status: string; iteration: number }> = new Map();
   private agentCounter = 0;
   private tasks: Task[] = [];
@@ -866,6 +866,7 @@ cwd: ${process.cwd()}`;
         }
 
         this.messages = this.sanitizeMessages(this.messages);
+        this.compressOldMessages();
         const stopTimer = this.startLiveTimer(`thinking (${iterations}/25)`);
         let response: any;
         try {
@@ -948,6 +949,35 @@ cwd: ${process.cwd()}`;
     } finally {
       process.removeListener('SIGINT', sigintHandler);
       this.abortTask = false;
+    }
+  }
+
+  // Comprime mensagens antigas pra não explodir tokens
+  // Mantém últimas 6 mensagens intactas, trunca content das anteriores
+  private compressOldMessages() {
+    const KEEP_RECENT = 6; // últimas 6 msgs com conteúdo completo
+    const MAX_OLD_CONTENT = 200; // chars max pra mensagens antigas
+
+    if (this.messages.length <= KEEP_RECENT + 2) return; // nada pra comprimir
+
+    const cutoff = this.messages.length - KEEP_RECENT;
+
+    for (let i = 1; i < cutoff; i++) { // pula system prompt (index 0)
+      const msg = this.messages[i];
+      if (!msg || !msg.content) continue;
+
+      // Já comprimido?
+      if (msg.content.length <= MAX_OLD_CONTENT) continue;
+
+      if (msg.role === 'tool') {
+        // Tool results antigos: só primeiras linhas
+        const firstLines = msg.content.split('\n').slice(0, 3).join('\n');
+        msg.content = firstLines.substring(0, MAX_OLD_CONTENT) + '...';
+      } else if (msg.role === 'assistant') {
+        // Respostas antigas: trunca
+        msg.content = msg.content.substring(0, MAX_OLD_CONTENT) + '...';
+      }
+      // user e system: mantém (são curtos)
     }
   }
 

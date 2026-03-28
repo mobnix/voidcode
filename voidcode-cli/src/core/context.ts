@@ -28,9 +28,9 @@ export function detectProjectContext(): string {
 // Gera índice compacto: árvore de arquivos com tamanho
 // O LLM já sabe tudo que existe sem precisar chamar list_directory/read_file
 function generateProjectIndex(cwd: string): string {
-  const IGNORE = new Set(['node_modules', '.git', 'dist', 'build', '.next', '__pycache__', 'venv', '.venv', 'coverage', '.cache', '.turbo']);
-  const MAX_DEPTH = 4;
-  const MAX_FILES = 80;
+  const IGNORE = new Set(['node_modules', '.git', 'dist', 'build', '.next', '__pycache__', 'venv', '.venv', 'coverage', '.cache', '.turbo', 'legacy', '.docker', 'logs', 'tmp', 'temp']);
+  const MAX_DEPTH = 3;
+  const MAX_FILES = 40;
   const files: string[] = [];
 
   function walk(dir: string, depth: number, prefix: string) {

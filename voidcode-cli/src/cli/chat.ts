@@ -552,6 +552,8 @@ export class ChatLoop {
           toolsToSend = this.allTools;
         }
 
+        // Sanitiza antes de enviar para a API (previne tool messages órfãs)
+        this.messages = this.sanitizeMessages(this.messages);
         const response = await this.service.chat(this.messages, toolsToSend);
         this.spinner.stop();
         this.messages.push(response);
@@ -635,8 +637,9 @@ export class ChatLoop {
     logger.dim('  Compactando...');
     this.spinner.start();
     try {
+      const safeMessages = this.sanitizeMessages(this.messages);
       const r = await this.service.chat([
-        ...this.messages,
+        ...safeMessages,
         { role: 'user', content: 'Resuma em 3 frases: objetivos, arquivos alterados, estado atual.' }
       ]);
       this.spinner.stop();
@@ -649,19 +652,46 @@ export class ChatLoop {
     } catch { this.spinner.stop(); }
   }
 
+  // Garante que messages estão válidas para a API:
+  // - Todo assistant com tool_calls precisa ser seguido por TODAS as tool responses
+  // - Toda tool message precisa ter um assistant com tool_calls antes
   private sanitizeMessages(msgs: any[]): any[] {
+    // Passo 1: identifica quais tool_call_ids têm respostas
+    const toolResponseIds = new Set<string>();
+    for (const msg of msgs) {
+      if (msg.role === 'tool' && msg.tool_call_id) toolResponseIds.add(msg.tool_call_id);
+    }
+
+    // Passo 2: identifica quais assistant+tool_calls estão completos
+    const validAssistantIndices = new Set<number>();
+    for (let i = 0; i < msgs.length; i++) {
+      const msg = msgs[i];
+      if (msg.role === 'assistant' && msg.tool_calls?.length) {
+        const allAnswered = msg.tool_calls.every((tc: any) => toolResponseIds.has(tc.id));
+        if (allAnswered) validAssistantIndices.add(i);
+      }
+    }
+
+    // Passo 3: coleta tool_call_ids válidos
+    const validToolCallIds = new Set<string>();
+    for (const i of validAssistantIndices) {
+      for (const tc of msgs[i].tool_calls) validToolCallIds.add(tc.id);
+    }
+
+    // Passo 4: filtra
     const clean: any[] = [];
     for (let i = 0; i < msgs.length; i++) {
       const msg = msgs[i];
       if (msg.role === 'tool') {
-        const prev = clean[clean.length - 1];
-        if (prev?.role === 'assistant' && prev?.tool_calls?.length) clean.push(msg);
+        // Só inclui se pertence a um assistant válido
+        if (validToolCallIds.has(msg.tool_call_id)) clean.push(msg);
       } else if (msg.role === 'assistant' && msg.tool_calls?.length) {
-        const hasAllTools = msg.tool_calls.every((tc: any) =>
-          msgs.slice(i + 1).some((m: any) => m.role === 'tool' && m.tool_call_id === tc.id)
-        );
-        if (hasAllTools) clean.push(msg);
-        else if (msg.content) clean.push({ role: 'assistant', content: msg.content });
+        if (validAssistantIndices.has(i)) {
+          clean.push(msg);
+        } else if (msg.content) {
+          // Converte para texto simples
+          clean.push({ role: 'assistant', content: msg.content });
+        }
       } else {
         clean.push(msg);
       }

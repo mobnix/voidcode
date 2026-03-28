@@ -61,6 +61,18 @@ export const PROVIDERS: Provider[] = [
     ]
   },
   {
+    id: 'huggingface',
+    name: 'Hugging Face',
+    baseURL: 'https://api-inference.huggingface.co/v1',
+    envKey: 'HF_API_KEY',
+    models: [
+      { id: 'Qwen/Qwen2.5-Coder-32B-Instruct', name: 'Qwen 2.5 Coder 32B', description: 'Melhor para coding, gratuito' },
+      { id: 'meta-llama/Llama-3.3-70B-Instruct', name: 'Llama 3.3 70B', description: 'Versátil, gratuito' },
+      { id: 'mistralai/Mixtral-8x7B-Instruct-v0.1', name: 'Mixtral 8x7B', description: 'Rápido, gratuito' },
+      { id: 'deepseek-ai/DeepSeek-Coder-V2-Instruct', name: 'DeepSeek Coder V2', description: 'Coding especializado' },
+    ]
+  },
+  {
     id: 'custom',
     name: 'Custom (OpenAI-compatible)',
     baseURL: '',

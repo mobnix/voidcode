@@ -30,7 +30,8 @@ program
     // Checa se tem alguma API key configurada
     const hasKey = process.env.DEEPSEEK_API_KEY || process.env.OPENAI_API_KEY ||
                    process.env.QWEN_API_KEY || process.env.MINIMAX_API_KEY ||
-                   process.env.GROQ_API_KEY || process.env.CUSTOM_API_KEY;
+                   process.env.GROQ_API_KEY || process.env.HF_API_KEY ||
+                   process.env.CUSTOM_API_KEY;
 
     if (!hasKey) {
       const success = await runConfigWizard(VOIDCODE_HOME);

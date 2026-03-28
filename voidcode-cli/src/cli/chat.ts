@@ -1,4 +1,3 @@
-import ora from 'ora';
 import chalk from 'chalk';
 import readline from 'node:readline';
 import fs from 'node:fs';
@@ -196,7 +195,6 @@ export class ChatLoop {
   private telegramBot: TelegramBridge | null = null;
   private processing = false; // true quando está processando uma tarefa
   private taskQueue: string[] = []; // fila de inputs pendentes
-  private spinner = ora({ text: 'Processando...', color: 'green', spinner: 'dots' });
 
   constructor(insaneMode = false) {
     this.service = new DeepSeekService();
@@ -206,14 +204,19 @@ export class ChatLoop {
       `Você é VOIDCODE, engenheiro sênior full-stack.`,
       `REGRAS CRÍTICAS:`,
       `1. CONCISO. Código fala, não explique o óbvio.`,
-      `2. Chame MÚLTIPLAS tools em PARALELO na mesma resposta (ex: ler 3 arquivos = 3 tool_calls).`,
-      `3. Antes de rodar projeto: instale deps primeiro (npm install, pip install).`,
+      `2. Chame MÚLTIPLAS tools em PARALELO na mesma resposta.`,
+      `3. Antes de rodar projeto: instale deps (npm install, pip install).`,
       `4. Para servidores: use background:true no run_shell_command.`,
       `5. NÃO releia arquivos que você acabou de escrever.`,
-      `6. Se um erro ocorrer, analise o erro e tente corrigir automaticamente.`,
+      `6. Se erro ocorrer, analise e corrija automaticamente.`,
       `7. Use memory_write para salvar decisões (category: user/project/feedback).`,
-      `8. Para edições cirúrgicas: use patch_file ou replace_file_content em vez de reescrever arquivo inteiro.`,
-      this.insaneMode ? '9. INSANE MODE: execute tudo direto.' : '9. Peça permissão antes de alterar.',
+      `EDIÇÃO INTELIGENTE DE ARQUIVOS:`,
+      `8. Para SABER o que tem em um arquivo: use file_info (0 tokens, retorna linhas/tamanho).`,
+      `9. Para LER parte de um arquivo: use read_file_lines (range de linhas) em vez de read_file.`,
+      `10. Para EDITAR: use patch_file (por linha) ou replace_file_content (por string). NUNCA reescreva arquivo inteiro com write_file se só precisa mudar algumas linhas.`,
+      `11. read_file retorna linhas NUMERADAS. Use os números para patch_file.`,
+      `12. Fluxo ideal: file_info → read_file_lines (só a parte relevante) → patch_file.`,
+      this.insaneMode ? '13. INSANE MODE: execute tudo direto.' : '13. Peça permissão antes de alterar.',
       `cwd: ${process.cwd()}`
     ].join('\n');
 
@@ -253,7 +256,6 @@ export class ChatLoop {
       }
     }
 
-    initFixedFooter();
     this.showFooter();
 
     while (true) {
@@ -269,15 +271,15 @@ export class ChatLoop {
       }
       if (userInput.startsWith('/')) { await this.handleCommand(userInput); continue; }
 
-      // Se já está processando, spawna como agente paralelo
+      // Se já está processando, spawna agente paralelo (sem limite)
       if (this.processing) {
         const preview = userInput.length > 60 ? userInput.substring(0, 60) + '...' : userInput;
-        logger.info(`Ocupado. Enviando para agente: "${preview}"`);
+        logger.info(`[+agent] "${preview}"`);
         this.spawnBackgroundAgent(userInput);
         continue;
       }
 
-      // Executa task - non-blocking: roda em background e volta pro prompt
+      // Primeira tarefa: roda em background, prompt fica livre
       this.processing = true;
       this.executeTaskBackground(userInput);
     }
@@ -320,8 +322,7 @@ export class ChatLoop {
     const snapshot = getCwdSnapshot();
 
     // Fase 1: PLANEJAR (sem tools)
-    this.spinner.text = 'Planejando...';
-    this.spinner.start();
+    logger.dim('  ⏳ Planejando...');
 
     const planMessages = [
       ...this.messages,
@@ -331,7 +332,6 @@ export class ChatLoop {
 
     try {
       const planResponse = await this.service.chat(planMessages);
-      this.spinner.stop();
 
       if (planResponse.content) {
         smartOutput(planResponse.content, 'PLAN');
@@ -362,7 +362,6 @@ export class ChatLoop {
         await this.processResponse();
       }
     } catch (e: any) {
-      this.spinner.stop();
       logger.error(`Erro no planejamento: ${e.message}`);
       // Fallback: executa direto
       this.messages.push({ role: 'user', content: userInput });
@@ -777,10 +776,11 @@ export class ChatLoop {
     }
   }
 
-  // --- Response Processing com retry e auto-correção ---
+  // --- Response Processing (zero spinner, non-blocking) ---
   private async processResponse() {
-    this.spinner.start();
-    const sigintHandler = () => { this.abortTask = true; this.spinner.stop(); logger.warn('\n  Abortando...'); };
+    logger.dim('  ⏳ Pensando...');
+
+    const sigintHandler = () => { this.abortTask = true; logger.warn('\n  ⚠ Abortando...'); };
     process.on('SIGINT', sigintHandler);
 
     try {
@@ -798,10 +798,8 @@ export class ChatLoop {
           toolsToSend = this.allTools;
         }
 
-        // Sanitiza antes de enviar para a API (previne tool messages órfãs)
         this.messages = this.sanitizeMessages(this.messages);
         const response = await this.service.chat(this.messages, toolsToSend);
-        this.spinner.stop();
         this.messages.push(response);
 
         if (response.content) smartOutput(response.content, 'VOIDCODE');
@@ -826,7 +824,6 @@ export class ChatLoop {
             this.toolCache.set(cacheKey, result);
             if (['write_file', 'replace_file_content', 'git_commit', 'run_shell_command', 'patch_file'].includes(name)) this.toolCache.invalidate();
 
-            // --- AUTO-CORREÇÃO: detecta erros em tool results ---
             if (result.startsWith('Erro:') || result.includes('MODULE_NOT_FOUND') || result.includes('ENOENT') || result.includes('command not found')) {
               this.consecutiveErrors++;
             } else {
@@ -837,16 +834,16 @@ export class ChatLoop {
           }));
 
           const elapsed = Date.now() - startTime;
-          toolProgress(toolCalls.length, toolCalls.length, `${elapsed}ms`);
+          logger.success(`${toolCalls.length} tools em ${elapsed}ms`);
           this.messages.push(...results);
+          this.showFooter();
 
-          // Se muitos erros seguidos, injeta dica de correção
           if (this.consecutiveErrors >= 2) {
             this.messages.push({
               role: 'system',
-              content: `[AUTO-FIX] Detectados ${this.consecutiveErrors} erros seguidos nos tool results acima. Analise os erros, identifique a causa raiz e corrija. Não repita a mesma ação que falhou.`
+              content: `[AUTO-FIX] ${this.consecutiveErrors} erros seguidos. Analise e corrija. Não repita a mesma ação.`
             });
-            logger.warn(`  Auto-correção: ${this.consecutiveErrors} erros detectados, instruindo LLM a corrigir.`);
+            logger.warn(`  Auto-correção: ${this.consecutiveErrors} erros.`);
           }
         } else {
           const results = [];
@@ -856,20 +853,18 @@ export class ChatLoop {
             logger.tool(name, JSON.stringify(toolArgs));
             const answer = await ask(chalk.hex('#ADFF2F')(`  Autorizar ${name.toUpperCase()}? (Y/n) `));
             if (answer.toLowerCase() === 'n') { results.push({ role: 'tool' as const, tool_call_id: tc.id, content: 'Recusado.' }); continue; }
-            this.spinner.start();
+            logger.dim(`  Executando ${name}...`);
             const handler = this.allHandlers[name];
             let result = handler ? await handler(toolArgs) : 'N/A';
             result = truncateToolOutput(String(result));
-            this.spinner.stop();
             logger.success(`${name} ok`);
             results.push({ role: 'tool' as const, tool_call_id: tc.id, content: result });
           }
           this.messages.push(...results);
         }
-        this.spinner.start();
+        logger.dim('  ⏳ Continuando...');
       }
     } catch (error: any) {
-      this.spinner.stop();
       if (!this.abortTask) logger.error(`[ERRO] ${error.message}`);
     } finally {
       process.removeListener('SIGINT', sigintHandler);
@@ -881,21 +876,19 @@ export class ChatLoop {
   // --- Compactação ---
   private async compactHistory() {
     logger.dim('  Compactando...');
-    this.spinner.start();
     try {
       const safeMessages = this.sanitizeMessages(this.messages);
       const r = await this.service.chat([
         ...safeMessages,
         { role: 'user', content: 'Resuma em 3 frases: objetivos, arquivos alterados, estado atual.' }
       ]);
-      this.spinner.stop();
       if (r?.content) {
         const sys = this.messages[0];
         const tail = this.sanitizeMessages(this.messages.slice(-6));
         this.messages = [sys, { role: 'system', content: `[CTX]: ${r.content}` }, ...tail];
         logger.success('Contexto compactado.');
       }
-    } catch { this.spinner.stop(); }
+    } catch { /* ok */ }
   }
 
   // Garante que messages estão válidas para a API:

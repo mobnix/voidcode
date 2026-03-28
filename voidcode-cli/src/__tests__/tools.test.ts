@@ -32,9 +32,9 @@ describe('toolHandlers', () => {
   });
 
   describe('read_file', () => {
-    it('reads file contents', () => {
+    it('reads file contents with line numbers', () => {
       const result = toolHandlers['read_file']!({ path: path.join(tmpDir, 'test.txt') });
-      expect(result).toBe('Hello World\nLine 2\nLine 3');
+      expect(result).toBe('1: Hello World\n2: Line 2\n3: Line 3');
     });
 
     it('returns error for non-existent file', () => {

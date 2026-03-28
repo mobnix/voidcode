@@ -101,24 +101,42 @@ export function truncateToolOutput(output: string): string {
     + output.substring(output.length - half);
 }
 
-// --- Footer ---
-export function initFixedFooter() { /* noop */ }
-export function destroyFixedFooter() { /* noop */ }
+// --- Footer sempre visível ---
+const FOOTER_HEIGHT = 2; // info + hints
+let lastFooterOpts: any = null;
+let frameActive = false;
 
-export function renderFooter(opts: {
-  model: string;
-  mode: string;
-  tokens: TokenUsage;
-  requests: number;
-  cwd: string;
-  messagesCount: number;
-}): void {
+export function initFixedFooter() {
+  if (!process.stdout.isTTY) return;
+  frameActive = true;
+  const rows = process.stdout.rows || 24;
+
+  // Scroll region: tudo EXCETO as últimas 2 linhas (footer)
+  process.stdout.write(`\x1b[1;${rows - FOOTER_HEIGHT}r`);
+
+  // Posiciona cursor no final da scroll region (onde o prompt vai ficar)
+  process.stdout.write(`\x1b[${rows - FOOTER_HEIGHT};1H`);
+
+  process.stdout.on('resize', () => {
+    if (!frameActive) return;
+    const r = process.stdout.rows || 24;
+    process.stdout.write(`\x1b[1;${r - FOOTER_HEIGHT}r`);
+    if (lastFooterOpts) paintFooter(lastFooterOpts);
+  });
+}
+
+export function destroyFixedFooter() {
+  if (!process.stdout.isTTY) return;
+  frameActive = false;
+  const rows = process.stdout.rows || 24;
+  process.stdout.write(`\x1b[1;${rows}r`);
+  process.stdout.write(`\x1b[${rows};1H\n`);
+}
+
+function paintFooter(opts: any) {
+  if (!process.stdout.isTTY) return;
+  const rows = process.stdout.rows || 24;
   const cols = process.stdout.columns || 80;
-
-  // Box drawing footer
-  const top = chalk.hex(matrixColors.darkGreen)('  ╔' + '═'.repeat(cols - 4) + '╗');
-  const bot = chalk.hex(matrixColors.darkGreen)('  ╚' + '═'.repeat(cols - 4) + '╝');
-  const pipe = chalk.hex(matrixColors.darkGreen)('║');
 
   const info = [
     chalk.hex(matrixColors.green)(`⚡ ${opts.model}`),
@@ -130,14 +148,30 @@ export function renderFooter(opts: {
     chalk.hex(matrixColors.dim)(`#${opts.requests}`),
   ].join(chalk.hex(matrixColors.darkGreen)(' │ '));
 
-  const hints = chalk.hex(matrixColors.dim)(`📂 ${shortenPath(opts.cwd)}`) +
+  const cwd = shortenPath(opts.cwd);
+  const hints = chalk.hex(matrixColors.dim)(`📂 ${cwd}`) +
     chalk.hex(matrixColors.darkGreen)('  ') +
     chalk.hex(matrixColors.dim)('/menu /help /plan /exit');
 
-  console.log(top);
-  console.log(`  ${pipe} ${info}`);
-  console.log(`  ${pipe} ${hints}`);
-  console.log(bot);
+  const footerRow = rows - FOOTER_HEIGHT + 1;
+
+  // Salva cursor, pinta footer, restaura cursor
+  process.stdout.write('\x1b7');
+  process.stdout.write(`\x1b[${footerRow};1H\x1b[2K ${info}`);
+  process.stdout.write(`\x1b[${footerRow + 1};1H\x1b[2K ${hints}`);
+  process.stdout.write('\x1b8');
+}
+
+export function renderFooter(opts: {
+  model: string;
+  mode: string;
+  tokens: TokenUsage;
+  requests: number;
+  cwd: string;
+  messagesCount: number;
+}): void {
+  lastFooterOpts = opts;
+  paintFooter(opts);
 }
 
 function formatTokens(n: number): string {

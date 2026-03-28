@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { Command } from 'commander';
 import { runConfigWizard } from './cli/wizard.js';
-import { splashScreen, logger } from './utils/ui.js';
+import { splashScreen, logger, initFixedFooter, renderFooter } from './utils/ui.js';
 import { ChatLoop } from './cli/chat.js';
 import dotenv from 'dotenv';
 import fs from 'node:fs';
@@ -30,7 +30,7 @@ program
     // Checa se tem alguma API key configurada
     const hasKey = process.env.DEEPSEEK_API_KEY || process.env.OPENAI_API_KEY ||
                    process.env.QWEN_API_KEY || process.env.MINIMAX_API_KEY ||
-                   process.env.CUSTOM_API_KEY;
+                   process.env.GROQ_API_KEY || process.env.CUSTOM_API_KEY;
 
     if (!hasKey) {
       const success = await runConfigWizard(VOIDCODE_HOME);
@@ -40,14 +40,25 @@ program
 
     splashScreen();
 
+    // Ativa footer fixo LOGO APÓS o splash
+    const provider = process.env.LLM_PROVIDER || 'deepseek';
+    const model = process.env.LLM_MODEL || 'deepseek-chat';
+    initFixedFooter();
+    renderFooter({
+      model: `${provider}/${model}`,
+      mode: options.insane ? 'INSANE' : 'SAFE',
+      tokens: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+      requests: 0,
+      cwd: process.cwd(),
+      messagesCount: 0
+    });
+
     if (options.insane) {
       logger.glitch('MODO INSANO ATIVADO');
     }
 
-    const provider = process.env.LLM_PROVIDER || 'deepseek';
-    const model = process.env.LLM_MODEL || 'deepseek-chat';
     logger.success(`Conectado: ${provider}/${model}`);
-    logger.matrix('\n[SISTEMA]: Use /auth para trocar provider. /help para comandos.\n');
+    logger.info('Use /auth para trocar provider. /help para comandos.\n');
 
     const chat = new ChatLoop(options.insane);
     await chat.start();

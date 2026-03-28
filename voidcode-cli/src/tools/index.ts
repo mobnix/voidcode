@@ -21,8 +21,22 @@ export const tools = [
   {
     type: 'function',
     function: {
+      name: 'file_info',
+      description: 'Retorna informações de um arquivo SEM ler o conteúdo (tamanho, linhas, tipo). Use antes de decidir se lê o arquivo inteiro ou só parte.',
+      parameters: {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: 'Caminho do arquivo.' }
+        },
+        required: ['path']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
       name: 'read_file',
-      description: 'Lê o conteúdo de um arquivo.',
+      description: 'Lê o conteúdo COMPLETO de um arquivo com linhas numeradas. Para arquivos grandes, prefira read_file_lines.',
       parameters: {
         type: 'object',
         properties: {
@@ -253,7 +267,7 @@ export const tools = [
 // Cada tool definition custa ~100-150 tokens. 15 tools = ~2k tokens por request.
 // Filtrando para 8-10 relevantes = economia de ~500-700 tokens/request.
 const TOOL_CATEGORIES: Record<string, string[]> = {
-  fs: ['list_directory', 'read_file', 'write_file', 'replace_file_content', 'glob_files', 'grep_search'],
+  fs: ['list_directory', 'file_info', 'read_file', 'read_file_lines', 'write_file', 'replace_file_content', 'patch_file', 'glob_files', 'grep_search'],
   git: ['git_status', 'git_diff', 'git_log', 'git_commit'],
   system: ['run_shell_command', 'spawn_sub_agent'],
   memory: ['memory_read', 'memory_write'],
@@ -331,13 +345,38 @@ export const toolHandlers: Record<string, (args: any) => any> = {
     }
   },
 
+  file_info: ({ path: filePath }) => {
+    try {
+      const resolved = safePath(filePath);
+      const stat = fs.statSync(resolved);
+      if (!stat.isFile()) return `Tipo: ${stat.isDirectory() ? 'diretório' : 'outro'}`;
+      const content = fs.readFileSync(resolved, 'utf-8');
+      const lines = content.split('\n').length;
+      const sizeKB = (stat.size / 1024).toFixed(1);
+      const ext = path.extname(filePath);
+      return `${filePath}: ${lines} linhas, ${sizeKB}KB, tipo: ${ext || 'sem extensão'}`;
+    } catch (e: any) {
+      return `Erro: ${e.message}`;
+    }
+  },
+
   read_file: ({ path: filePath }) => {
     try {
       const resolved = safePath(filePath);
       const stat = fs.statSync(resolved);
-      if (stat.size > MAX_READ_SIZE) return `Erro: Arquivo muito grande (${(stat.size / 1024 / 1024).toFixed(1)}MB, max 10MB).`;
+      if (stat.size > MAX_READ_SIZE) return `Erro: Arquivo muito grande (${(stat.size / 1024 / 1024).toFixed(1)}MB, max 10MB). Use read_file_lines.`;
       if (!stat.isFile()) return `Erro: Não é um arquivo regular.`;
-      return fs.readFileSync(resolved, 'utf-8');
+      const content = fs.readFileSync(resolved, 'utf-8');
+      // Retorna com linhas numeradas para facilitar patch_file
+      const lines = content.split('\n');
+      if (lines.length > 500) {
+        // Arquivo grande: retorna resumo + sugere read_file_lines
+        return `[${lines.length} linhas - mostrando primeiras 100 e últimas 50. Use read_file_lines para range específico]\n\n` +
+          lines.slice(0, 100).map((l, i) => `${i + 1}: ${l}`).join('\n') +
+          `\n\n... [${lines.length - 150} linhas ocultas] ...\n\n` +
+          lines.slice(-50).map((l, i) => `${lines.length - 50 + i + 1}: ${l}`).join('\n');
+      }
+      return lines.map((l, i) => `${i + 1}: ${l}`).join('\n');
     } catch (e: any) {
       return `Erro: ${e.message}`;
     }

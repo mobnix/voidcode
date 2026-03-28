@@ -49,6 +49,18 @@ export const PROVIDERS: Provider[] = [
     ]
   },
   {
+    id: 'groq',
+    name: 'Groq',
+    baseURL: 'https://api.groq.com/openai/v1',
+    envKey: 'GROQ_API_KEY',
+    models: [
+      { id: 'llama-3.3-70b-versatile', name: 'Llama 3.3 70B', description: 'Ultra rápido, bom para coding' },
+      { id: 'llama-3.1-8b-instant', name: 'Llama 3.1 8B', description: 'Mais rápido, tarefas simples' },
+      { id: 'mixtral-8x7b-32768', name: 'Mixtral 8x7B', description: 'Bom contexto (32k), balanceado' },
+      { id: 'gemma2-9b-it', name: 'Gemma 2 9B', description: 'Google, rápido e leve' },
+    ]
+  },
+  {
     id: 'custom',
     name: 'Custom (OpenAI-compatible)',
     baseURL: '',

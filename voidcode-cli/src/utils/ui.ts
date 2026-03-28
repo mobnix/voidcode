@@ -13,123 +13,93 @@ export const matrixColors = {
 };
 
 export const matrixGradient = gradient(['#003B00', '#008F11', '#00FF41', '#ADFF2F']);
-export const hackerGradient = gradient(['#008F11', '#ADFF2F', '#00FF41']);
 const voidGradient = gradient(['#00FF41', '#008F11', '#ADFF2F', '#00FF41']);
 
+// Logger minimalista - sem emojis, sem ruído
 export const logger = {
-  info: (msg: string) => console.log(chalk.hex(matrixColors.mediumGreen)('  ◈ ') + chalk.hex(matrixColors.green)(msg)),
-  success: (msg: string) => console.log(chalk.hex(matrixColors.brightGreen).bold('  ✔ ') + chalk.hex(matrixColors.brightGreen)(msg)),
-  error: (msg: string) => console.log(chalk.red.bold('  ✘ ') + chalk.red(msg)),
+  info: (msg: string) => console.log(chalk.hex(matrixColors.green)(msg)),
+  success: (msg: string) => console.log(chalk.hex(matrixColors.brightGreen)(msg)),
+  error: (msg: string) => console.log(chalk.red(msg)),
   matrix: (msg: string) => console.log(matrixGradient(msg)),
-  warn: (msg: string) => console.log(chalk.yellow('  ⚠ ') + chalk.yellow(msg)),
+  warn: (msg: string) => console.log(chalk.yellow(msg)),
   dim: (msg: string) => console.log(chalk.hex(matrixColors.dim)(msg)),
-  glitch: (msg: string) => {
-    const colors = [chalk.hex('#00FF41'), chalk.hex('#ADFF2F'), chalk.hex('#008F11')];
-    const glitched = msg.split('').map(char => colors[Math.floor(Math.random() * colors.length)]!(char)).join('');
-    console.log(glitched);
-  },
+  glitch: (msg: string) => console.log(chalk.hex(matrixColors.brightGreen)(msg)),
   tool: (name: string, args: string) => {
-    const truncatedArgs = args.length > 150 ? args.substring(0, 150) + chalk.hex(matrixColors.dim)('...') : args;
-    console.log(
-      chalk.hex(matrixColors.darkGreen)('  ┌─') +
-      chalk.hex(matrixColors.brightGreen).bold(` ⚡ ${name.toUpperCase()} `) +
-      chalk.hex(matrixColors.darkGreen)('─'.repeat(Math.max(0, 40 - name.length)))
-    );
-    console.log(chalk.hex(matrixColors.darkGreen)('  │ ') + chalk.hex(matrixColors.dim)(truncatedArgs));
-    console.log(chalk.hex(matrixColors.darkGreen)('  └' + '─'.repeat(44)));
+    const short = args.length > 100 ? args.substring(0, 100) + '...' : args;
+    console.log(chalk.hex(matrixColors.dim)(`  ${name} ${short}`));
   }
 };
 
-// --- Progress Bar ASCII ---
+// Progress bar
 export function progressBar(current: number, total: number, width = 30): string {
   const pct = Math.min(1, current / total);
   const filled = Math.round(width * pct);
-  const empty = width - filled;
-  const bar =
-    chalk.hex(matrixColors.brightGreen)('█'.repeat(filled)) +
-    chalk.hex(matrixColors.darkGreen)('░'.repeat(empty));
-  const pctStr = chalk.hex(matrixColors.green)(`${Math.round(pct * 100)}%`);
-  return `  ${bar} ${pctStr} (${current}/${total})`;
+  const bar = chalk.hex(matrixColors.brightGreen)('█'.repeat(filled)) + chalk.hex(matrixColors.darkGreen)('░'.repeat(width - filled));
+  return `  ${bar} ${Math.round(pct * 100)}% (${current}/${total})`;
 }
 
-// Progress bar para tool execution
 export function toolProgress(current: number, total: number, name: string): void {
-  const pct = Math.min(1, current / total);
-  const width = 25;
-  const filled = Math.round(width * pct);
-  const empty = width - filled;
-  const bar =
-    chalk.hex(matrixColors.brightGreen)('█'.repeat(filled)) +
-    chalk.hex(matrixColors.darkGreen)('░'.repeat(empty));
-  process.stdout.write(
-    `\r  ${bar} ${chalk.hex(matrixColors.green)(`${current}/${total}`)} ${chalk.hex(matrixColors.dim)(name)}`
-  );
+  process.stdout.write(`\r  ${current}/${total} ${chalk.hex(matrixColors.dim)(name)}`);
   if (current === total) process.stdout.write('\n');
 }
 
-// --- Smart text output ---
-const MAX_OUTPUT_LINES = 50;
+// Output de texto do LLM
 const COLLAPSE_THRESHOLD = 60;
 
 export function smartOutput(text: string, label: string = 'VOIDCODE'): void {
   const lines = text.split('\n');
-  const prefix = chalk.hex('#00FF41').bold(`${label} ▸ `);
 
   if (lines.length <= COLLAPSE_THRESHOLD) {
-    console.log('\n' + prefix + text + '\n');
+    console.log('\n' + chalk.hex('#00FF41').bold(`${label} > `) + text + '\n');
     return;
   }
 
-  const headLines = lines.slice(0, MAX_OUTPUT_LINES / 2);
-  const tailLines = lines.slice(-(MAX_OUTPUT_LINES / 2));
-  const hidden = lines.length - MAX_OUTPUT_LINES;
+  const head = lines.slice(0, 25);
+  const tail = lines.slice(-25);
+  const hidden = lines.length - 50;
 
-  console.log('\n' + prefix);
-  console.log(headLines.join('\n'));
-  console.log(chalk.hex(matrixColors.dim)(`\n  ⋯ [${hidden} linhas ocultas] ⋯\n`));
-  console.log(tailLines.join('\n'));
-  console.log();
+  console.log('\n' + chalk.hex('#00FF41').bold(`${label} >`));
+  console.log(head.join('\n'));
+  console.log(chalk.hex(matrixColors.dim)(`  ... ${hidden} linhas ocultas ...`));
+  console.log(tail.join('\n') + '\n');
 }
 
-const MAX_TOOL_OUTPUT_CHARS = 15000;
+const MAX_TOOL_OUTPUT = 5000; // 5k chars max por tool result
 
 export function truncateToolOutput(output: string): string {
-  if (output.length <= MAX_TOOL_OUTPUT_CHARS) return output;
-  const half = Math.floor(MAX_TOOL_OUTPUT_CHARS / 2);
-  return output.substring(0, half)
-    + `\n\n⋯ [TRUNCADO: ${output.length - MAX_TOOL_OUTPUT_CHARS} chars] ⋯\n\n`
-    + output.substring(output.length - half);
+  if (output.length <= MAX_TOOL_OUTPUT) return output;
+  // Mantém início e final (erros geralmente ficam no final)
+  const head = 2500;
+  const tail = 2000;
+  return output.substring(0, head) +
+    `\n... [${output.length - head - tail} chars ocultos] ...\n` +
+    output.substring(output.length - tail);
 }
 
-// --- Footer sempre visível ---
-const FOOTER_HEIGHT = 2; // info + hints
-let lastFooterOpts: any = null;
-let frameActive = false;
+// Footer fixo nas 2 últimas linhas via scroll region
+const FOOTER_LINES = 2;
+let footerActive = false;
+let lastOpts: any = null;
 
 export function initFixedFooter() {
   if (!process.stdout.isTTY) return;
-  frameActive = true;
+  footerActive = true;
+  setupScrollRegion();
+  process.stdout.on('resize', () => { if (footerActive) setupScrollRegion(); });
+}
+
+function setupScrollRegion() {
   const rows = process.stdout.rows || 24;
-
-  // Scroll region: tudo EXCETO as últimas 2 linhas (footer)
-  process.stdout.write(`\x1b[1;${rows - FOOTER_HEIGHT}r`);
-
-  // Posiciona cursor no final da scroll region (onde o prompt vai ficar)
-  process.stdout.write(`\x1b[${rows - FOOTER_HEIGHT};1H`);
-
-  process.stdout.on('resize', () => {
-    if (!frameActive) return;
-    const r = process.stdout.rows || 24;
-    process.stdout.write(`\x1b[1;${r - FOOTER_HEIGHT}r`);
-    if (lastFooterOpts) paintFooter(lastFooterOpts);
-  });
+  // Scroll region: linhas 1 até (rows - 2). Footer fica fora.
+  process.stdout.write(`\x1b[1;${rows - FOOTER_LINES}r`);
+  if (lastOpts) paintFooter(lastOpts);
 }
 
 export function destroyFixedFooter() {
   if (!process.stdout.isTTY) return;
-  frameActive = false;
+  footerActive = false;
   const rows = process.stdout.rows || 24;
-  process.stdout.write(`\x1b[1;${rows}r`);
+  process.stdout.write(`\x1b[1;${rows}r`); // reset scroll region
   process.stdout.write(`\x1b[${rows};1H\n`);
 }
 
@@ -138,27 +108,22 @@ function paintFooter(opts: any) {
   const rows = process.stdout.rows || 24;
   const cols = process.stdout.columns || 80;
 
-  const info = [
-    chalk.hex(matrixColors.green)(`⚡ ${opts.model}`),
-    chalk.hex(matrixColors.brightGreen).bold(opts.mode),
+  const parts = [
+    chalk.hex(matrixColors.green)(opts.model),
+    chalk.hex(matrixColors.brightGreen)(opts.mode),
     chalk.hex(matrixColors.dim)(`msgs:${opts.messagesCount}`),
-    chalk.hex(matrixColors.dim)(`⬆${formatTokens(opts.tokens.promptTokens)}`),
-    chalk.hex(matrixColors.dim)(`⬇${formatTokens(opts.tokens.completionTokens)}`),
-    chalk.hex(matrixColors.dim)(`Σ${formatTokens(opts.tokens.totalTokens)}`),
-    chalk.hex(matrixColors.dim)(`#${opts.requests}`),
-  ].join(chalk.hex(matrixColors.darkGreen)(' │ '));
+    chalk.hex(matrixColors.dim)(`in:${fmtT(opts.tokens.promptTokens)}`),
+    chalk.hex(matrixColors.dim)(`out:${fmtT(opts.tokens.completionTokens)}`),
+    chalk.hex(matrixColors.dim)(`total:${fmtT(opts.tokens.totalTokens)}`),
+    chalk.hex(matrixColors.dim)(`reqs:${opts.requests}`),
+  ].join(chalk.hex(matrixColors.darkGreen)(' | '));
 
-  const cwd = shortenPath(opts.cwd);
-  const hints = chalk.hex(matrixColors.dim)(`📂 ${cwd}`) +
-    chalk.hex(matrixColors.darkGreen)('  ') +
-    chalk.hex(matrixColors.dim)('/menu /help /plan /exit');
+  const hints = chalk.hex(matrixColors.dim)(`${shortenPath(opts.cwd)}  /menu /help /plan /exit`);
 
-  const footerRow = rows - FOOTER_HEIGHT + 1;
-
-  // Salva cursor, pinta footer, restaura cursor
+  // Salva cursor, pinta nas 2 últimas linhas, restaura cursor
   process.stdout.write('\x1b7');
-  process.stdout.write(`\x1b[${footerRow};1H\x1b[2K ${info}`);
-  process.stdout.write(`\x1b[${footerRow + 1};1H\x1b[2K ${hints}`);
+  process.stdout.write(`\x1b[${rows - 1};1H\x1b[2K ${parts}`);
+  process.stdout.write(`\x1b[${rows};1H\x1b[2K ${hints}`);
   process.stdout.write('\x1b8');
 }
 
@@ -170,11 +135,23 @@ export function renderFooter(opts: {
   cwd: string;
   messagesCount: number;
 }): void {
-  lastFooterOpts = opts;
-  paintFooter(opts);
+  lastOpts = opts;
+  if (footerActive) {
+    paintFooter(opts);
+  } else {
+    // Fallback inline se não é TTY
+    const cols = process.stdout.columns || 80;
+    console.log(chalk.hex(matrixColors.darkGreen)('─'.repeat(cols)));
+    const parts = [
+      chalk.hex(matrixColors.green)(opts.model),
+      chalk.hex(matrixColors.brightGreen)(opts.mode),
+      chalk.hex(matrixColors.dim)(`msgs:${opts.messagesCount} total:${fmtT(opts.tokens.totalTokens)}`),
+    ].join(chalk.hex(matrixColors.darkGreen)(' | '));
+    console.log(` ${parts}`);
+  }
 }
 
-function formatTokens(n: number): string {
+function fmtT(n: number): string {
   if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + 'M';
   if (n >= 1_000) return (n / 1_000).toFixed(1) + 'k';
   return String(n);
@@ -182,14 +159,12 @@ function formatTokens(n: number): string {
 
 function shortenPath(p: string): string {
   const home = process.env.HOME || process.env.USERPROFILE || '';
-  if (home && p.startsWith(home)) return '~' + p.slice(home.length);
-  return p;
+  return (home && p.startsWith(home)) ? '~' + p.slice(home.length) : p;
 }
 
-// --- Splash Screen ---
+// Splash screen
 export const splashScreen = () => {
   console.clear();
-
   const logo = `
   ██╗   ██╗ ██████╗ ██╗██████╗  ██████╗ ██████╗ ██████╗ ███████╗
   ██║   ██║██╔═══██╗██║██╔══██╗██╔════╝██╔═══██╗██╔══██╗██╔════╝
@@ -202,20 +177,10 @@ export const splashScreen = () => {
   console.log();
 
   const cols = process.stdout.columns || 80;
-  const box = (text: string) => chalk.hex(matrixColors.darkGreen)('  ║ ') + text;
-  const line = chalk.hex(matrixColors.darkGreen)('  ╠' + '═'.repeat(cols - 4) + '╣');
-  const top = chalk.hex(matrixColors.darkGreen)('  ╔' + '═'.repeat(cols - 4) + '╗');
-  const bot = chalk.hex(matrixColors.darkGreen)('  ╚' + '═'.repeat(cols - 4) + '╝');
+  const line = chalk.hex(matrixColors.darkGreen)('─'.repeat(cols));
 
-  console.log(top);
-  console.log(box(chalk.hex(matrixColors.mediumGreen).italic('"Free your mind... the Matrix is everywhere."')));
   console.log(line);
-  console.log(box(chalk.hex(matrixColors.green)('STATUS    ') + chalk.hex(matrixColors.brightGreen).bold('■ ONLINE')));
-  console.log(box(chalk.hex(matrixColors.green)('VERSION   ') + chalk.hex(matrixColors.brightGreen)('2.0.0')));
-  console.log(box(chalk.hex(matrixColors.green)('ENGINE    ') + chalk.hex(matrixColors.brightGreen)('Multi-LLM (DeepSeek, OpenAI, Qwen, MiniMax)')));
-  console.log(box(chalk.hex(matrixColors.green)('ENCRYPT   ') + chalk.hex(matrixColors.brightGreen)('AES-256-VOID')));
+  console.log(chalk.hex(matrixColors.dim)(' Multi-LLM Agentic CLI v2.0                                   by Mobnix'));
   console.log(line);
-  console.log(box(chalk.hex(matrixColors.dim)('Created by Mobnix')));
-  console.log(bot);
   console.log();
 };

@@ -55,8 +55,9 @@ export const PROVIDERS: Provider[] = [
     envKey: 'GROQ_API_KEY',
     models: [
       { id: 'llama-3.3-70b-versatile', name: 'Llama 3.3 70B', description: 'Ultra rápido, bom para coding' },
-      { id: 'llama-3.1-8b-instant', name: 'Llama 3.1 8B', description: 'Mais rápido, tarefas simples' },
-      { id: 'mixtral-8x7b-32768', name: 'Mixtral 8x7B', description: 'Bom contexto (32k), balanceado' },
+      { id: 'llama-3.1-8b-instant', name: 'Llama 3.1 8B', description: 'Rápido, limite 6k tokens (tier free)' },
+      { id: 'qwen-qwq-32b', name: 'Qwen QWQ 32B', description: 'Reasoning, bom contexto' },
+      { id: 'deepseek-r1-distill-llama-70b', name: 'DeepSeek R1 70B', description: 'Reasoning avançado' },
       { id: 'gemma2-9b-it', name: 'Gemma 2 9B', description: 'Google, rápido e leve' },
     ]
   },

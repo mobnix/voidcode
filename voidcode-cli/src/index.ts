@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { Command } from 'commander';
 import { runConfigWizard } from './cli/wizard.js';
-import { splashScreen, logger, initFixedFooter, renderFooter } from './utils/ui.js';
+import { splashScreen, logger } from './utils/ui.js';
 import { ChatLoop } from './cli/chat.js';
 import dotenv from 'dotenv';
 import fs from 'node:fs';
@@ -41,25 +41,15 @@ program
 
     splashScreen();
 
-    // Ativa footer fixo LOGO APÓS o splash
     const provider = process.env.LLM_PROVIDER || 'deepseek';
     const model = process.env.LLM_MODEL || 'deepseek-chat';
-    initFixedFooter();
-    renderFooter({
-      model: `${provider}/${model}`,
-      mode: options.insane ? 'INSANE' : 'SAFE',
-      tokens: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
-      requests: 0,
-      cwd: process.cwd(),
-      messagesCount: 0
-    });
 
     if (options.insane) {
       logger.glitch('MODO INSANO ATIVADO');
     }
 
     logger.success(`Conectado: ${provider}/${model}`);
-    logger.info('Use /auth para trocar provider. /help para comandos.\n');
+    logger.info('/auth trocar provider | /help comandos\n');
 
     const chat = new ChatLoop(options.insane);
     await chat.start();

@@ -167,12 +167,8 @@ function isComplexTask(input: string): boolean {
     /implement(e|ar)/i,
     /refator(e|ar)/i,
     /migr(e|ar)/i,
-    /configur(e|ar).*(completo|inteiro|todo)/i,
-    /\b(full|inteiro|completo|todo o|todos os)\b/i,
-    /\bdo zero\b/i,
-    /\bfrom scratch\b/i,
-    /múltiplo|vários arquivos|varias pastas/i,
-    /subir.*servidor|deploy|build.*prod/i,
+    /\bdo zero\b|from scratch/i,
+    /deploy.*prod/i,
   ];
   return complexPatterns.some(p => p.test(input));
 }
@@ -186,7 +182,7 @@ export class ChatLoop {
   private allTools: any[] = [];
   private allHandlers: Record<string, (args: any) => any> = {};
   private readonly MAX_HISTORY_LENGTH = 20;
-  private activeAgents: Map<string, { promise: Promise<string>; objective: string; startedAt: Date }> = new Map();
+  private activeAgents: Map<string, { promise: Promise<string>; objective: string; startedAt: Date; status: string; iteration: number }> = new Map();
   private agentCounter = 0;
   private tasks: Task[] = [];
   private taskCounter = 0;
@@ -200,25 +196,11 @@ export class ChatLoop {
     this.service = new DeepSeekService();
     this.insaneMode = insaneMode;
 
-    const systemPrompt = [
-      `Você é VOIDCODE, engenheiro sênior full-stack.`,
-      `REGRAS CRÍTICAS:`,
-      `1. CONCISO. Código fala, não explique o óbvio.`,
-      `2. Chame MÚLTIPLAS tools em PARALELO na mesma resposta.`,
-      `3. Antes de rodar projeto: instale deps (npm install, pip install).`,
-      `4. Para servidores: use background:true no run_shell_command.`,
-      `5. NÃO releia arquivos que você acabou de escrever.`,
-      `6. Se erro ocorrer, analise e corrija automaticamente.`,
-      `7. Use memory_write para salvar decisões (category: user/project/feedback).`,
-      `EDIÇÃO INTELIGENTE DE ARQUIVOS:`,
-      `8. Para SABER o que tem em um arquivo: use file_info (0 tokens, retorna linhas/tamanho).`,
-      `9. Para LER parte de um arquivo: use read_file_lines (range de linhas) em vez de read_file.`,
-      `10. Para EDITAR: use patch_file (por linha) ou replace_file_content (por string). NUNCA reescreva arquivo inteiro com write_file se só precisa mudar algumas linhas.`,
-      `11. read_file retorna linhas NUMERADAS. Use os números para patch_file.`,
-      `12. Fluxo ideal: file_info → read_file_lines (só a parte relevante) → patch_file.`,
-      this.insaneMode ? '13. INSANE MODE: execute tudo direto.' : '13. Peça permissão antes de alterar.',
-      `cwd: ${process.cwd()}`
-    ].join('\n');
+    const systemPrompt = `VOIDCODE, engenheiro sênior. Conciso.
+O INDEX abaixo já lista todos os arquivos do projeto. NÃO use list_directory se o arquivo está no index. Vá direto no arquivo que precisa.
+Tools em paralelo. Deps antes de rodar. background:true para servers. read_file_lines+patch_file para editar.
+${this.insaneMode ? 'Execute direto.' : 'Peça permissão.'}
+cwd: ${process.cwd()}`;
 
     this.messages.push({ role: 'system', content: systemPrompt });
 
@@ -231,13 +213,8 @@ export class ChatLoop {
     this.allTools = [...tools, ...skillTools];
     this.allHandlers = { ...toolHandlers, ...skillHandlers };
 
-    try {
-      const memory = loadStructuredMemory();
-      if (memory) {
-        this.messages.push({ role: 'system', content: `[MEM]:\n${memory}` });
-        logger.info('Memória carregada.');
-      }
-    } catch { /* ok */ }
+    // Memória NÃO é injetada no prompt (gasta muitos tokens).
+    // O LLM acessa via tool memory_read quando precisar.
 
     const sessions = loadAllSessions();
     if (sessions.length > 0) {
@@ -256,6 +233,8 @@ export class ChatLoop {
       }
     }
 
+    // Ativa footer fixo AGORA - todo output inicial já foi feito
+    initFixedFooter();
     this.showFooter();
 
     while (true) {
@@ -263,7 +242,10 @@ export class ChatLoop {
 
       const mode = this.planMode ? chalk.hex('#ADFF2F')('[PLAN] ') : '';
       const busy = this.processing ? chalk.hex('#008F11')('[busy] ') : '';
+      const cols = process.stdout.columns || 80;
+      console.log(chalk.hex('#003B00')('─'.repeat(cols)));
       const userInput = await ask(busy + mode + chalk.hex('#00FF41')('Mob > '));
+      console.log(chalk.hex('#003B00')('─'.repeat(cols)));
 
       if (!userInput) continue;
       if (userInput.toLowerCase() === '/exit' || userInput.toLowerCase() === 'exit') {
@@ -291,8 +273,6 @@ export class ChatLoop {
         if (isComplexTask(userInput) && !this.planMode) {
           await this.handleComplexTask(userInput);
         } else {
-          const snapshot = getCwdSnapshot();
-          if (snapshot) this.messages.push({ role: 'system', content: `[CWD]: ${snapshot}` });
           this.messages.push({ role: 'user', content: userInput });
           this.toolCache.invalidate();
           await this.processResponse();
@@ -322,16 +302,18 @@ export class ChatLoop {
     const snapshot = getCwdSnapshot();
 
     // Fase 1: PLANEJAR (sem tools)
-    logger.dim('  ⏳ Planejando...');
+    logger.dim('  planning...');
 
     const planMessages = [
       ...this.messages,
       { role: 'system', content: `[CWD]: ${snapshot}` },
-      { role: 'user', content: `TAREFA: ${userInput}\n\nAntes de executar, crie um plano DETALHADO:\n1. Liste TODOS os arquivos que precisa criar/modificar\n2. Liste as dependências necessárias\n3. Liste os comandos que precisa rodar\n4. Ordene os passos para máxima paralelização\n\nResponda APENAS com o plano, NÃO execute nada ainda.` }
+      { role: 'user', content: `TAREFA: ${userInput}\n\nPLANEJE antes de executar:\n1. Que arquivos precisa LER para entender o contexto?\n2. Que arquivos precisa criar/modificar?\n3. Que comandos precisa rodar (install, build, start)?\n4. Qual a ordem ideal?\n\nSó o plano, NÃO execute ainda.` }
     ];
 
     try {
+      const stopPlanTimer = this.startLiveTimer('planning');
       const planResponse = await this.service.chat(planMessages);
+      stopPlanTimer();
 
       if (planResponse.content) {
         smartOutput(planResponse.content, 'PLAN');
@@ -487,13 +469,18 @@ export class ChatLoop {
 
   private async authMenu() {
     const sep = chalk.hex('#003B00')('─'.repeat(process.stdout.columns || 80));
+    const defaultProvider = process.env.LLM_PROVIDER || 'deepseek';
+    const defaultModel = process.env.LLM_MODEL || 'deepseek-chat';
+
     console.log(`\n${sep}\n${chalk.hex('#00FF41').bold('  PROVIDER & AUTH')}`);
-    console.log(`  Atual: ${chalk.hex('#ADFF2F').bold(this.service.provider)} / ${chalk.hex('#ADFF2F').bold(this.service.modelName)}\n${sep}`);
+    console.log(`  Atual: ${chalk.hex('#ADFF2F').bold(this.service.provider)} / ${chalk.hex('#ADFF2F').bold(this.service.modelName)}`);
+    console.log(`  Default: ${chalk.hex('#005500')(defaultProvider)} / ${chalk.hex('#005500')(defaultModel)}\n${sep}`);
 
     PROVIDERS.forEach((p, i) => {
-      const active = p.id === this.service.provider ? chalk.hex('#ADFF2F')(' <--') : '';
-      const hasKey = process.env[p.envKey] ? chalk.hex('#00FF41')(' [ok]') : chalk.hex('#005500')(' [sem key]');
-      console.log(`  ${chalk.hex('#008F11')(`${i + 1})`)} ${chalk.hex('#ADFF2F')(p.name)}${hasKey}${active}`);
+      const active = p.id === this.service.provider ? chalk.hex('#ADFF2F')(' ◀ ativo') : '';
+      const isDefault = p.id === defaultProvider ? chalk.hex('#008F11')(' ★ default') : '';
+      const hasKey = process.env[p.envKey] ? chalk.hex('#00FF41')(' [key ok]') : chalk.hex('#005500')(' [sem key]');
+      console.log(`  ${chalk.hex('#008F11')(`${i + 1})`)} ${chalk.hex('#ADFF2F')(p.name)}${hasKey}${active}${isDefault}`);
     });
     console.log(`  ${chalk.hex('#008F11')('0)')} Cancelar\n`);
 
@@ -523,7 +510,10 @@ export class ChatLoop {
     let model = '';
     if (provider.models.length > 0) {
       console.log(chalk.hex('#00FF41')('\n  Modelos:'));
-      provider.models.forEach((m, i) => console.log(`  ${i + 1}) ${chalk.hex('#ADFF2F')(m.name)} ${chalk.hex('#005500')(`- ${m.description}`)}`));
+      provider.models.forEach((m, i) => {
+        const def = m.id === defaultModel && provider.id === defaultProvider ? chalk.hex('#008F11')(' ★') : '';
+        console.log(`  ${i + 1}) ${chalk.hex('#ADFF2F')(m.name)} ${chalk.hex('#005500')(`- ${m.description}`)}${def}`);
+      });
       console.log(`  ${provider.models.length + 1}) Custom\n`);
       const mi = parseInt(await ask(chalk.hex('#008F11')('Modelo: '))) - 1;
       model = (mi >= 0 && mi < provider.models.length) ? provider.models[mi]!.id : await ask(chalk.hex('#008F11')('Nome: '));
@@ -532,9 +522,21 @@ export class ChatLoop {
     }
     if (!model) return;
 
-    saveConfig({ provider: provider.id, model, baseURL, apiKey, envKey: provider.envKey });
+    // Conecta
     this.service.reconnect(apiKey, baseURL, model, provider.id);
     logger.success(`Conectado: ${provider.name} / ${model}`);
+
+    // Pergunta se quer salvar como default
+    const setDefault = await ask(chalk.hex('#008F11')('Salvar como default? (Y/n): '));
+    if (setDefault.toLowerCase() !== 'n') {
+      saveConfig({ provider: provider.id, model, baseURL, apiKey, envKey: provider.envKey });
+      logger.success(`★ Default salvo: ${provider.name} / ${model}`);
+    } else {
+      // Salva só a key (sem trocar provider/model default)
+      saveConfig({ apiKey, envKey: provider.envKey });
+      logger.info(`Usando ${provider.name} / ${model} só nesta sessão.`);
+    }
+
     this.showFooter();
   }
 
@@ -736,19 +738,49 @@ export class ChatLoop {
   // --- Multi-Agent ---
   private spawnBackgroundAgent(objective: string) {
     const id = `agent-${++this.agentCounter}`;
-    logger.info(`[${id}] "${objective}"`);
+    const agentData = { promise: null as any, objective, startedAt: new Date(), status: 'starting', iteration: 0 };
+
+    const updateStatus = (s: string, iter?: number) => {
+      agentData.status = s;
+      if (iter !== undefined) agentData.iteration = iter;
+      logger.dim(`  [${id}] ${s}`);
+    };
 
     const promise = (async () => {
       try {
         const svc = new DeepSeekService();
         const msgs: any[] = [
-          { role: 'system', content: `Sub-agente VOIDCODE. Direto. Use múltiplas tools em paralelo. cwd: ${process.cwd()}` },
+          { role: 'system', content: `Sub-agente VOIDCODE. Direto. Tools em paralelo. cwd: ${process.cwd()}` },
           { role: 'user', content: objective }
         ];
-        for (let i = 0; i < 10; i++) {
-          const r = await svc.chat(msgs, this.allTools as any);
+
+        for (let i = 0; i < 20; i++) {
+          const agentTokens = svc.sessionUsage.totalTokens;
+          updateStatus(`thinking... ${agentTokens > 1000 ? (agentTokens/1000).toFixed(1)+'k' : agentTokens} tokens`, i + 1);
+
+          let r: any;
+          try {
+            r = await svc.chat(msgs, this.allTools as any);
+          } catch (e: any) {
+            updateStatus(`erro: ${e.message}`);
+            return `Erro: ${e.message}`;
+          }
+
+          if (!r || (!r.content && !r.tool_calls?.length)) {
+            updateStatus('resposta vazia, encerrando');
+            return 'Resposta vazia da API.';
+          }
+
           msgs.push(r);
-          if (!r.tool_calls?.length) return r.content || 'Concluído.';
+
+          if (!r.tool_calls?.length) {
+            updateStatus('done');
+            return r.content || 'Concluído.';
+          }
+
+          const names = r.tool_calls.map((tc: any) => tc.function.name).join(', ');
+          updateStatus(`${r.tool_calls.length} tools: ${names}`, i + 1);
+
           const results = await Promise.all(r.tool_calls.map(async (tc: any) => {
             const h = this.allHandlers[tc.function.name];
             const res = h ? await h(safeJSONParse(tc.function.arguments)) : 'N/A';
@@ -756,50 +788,102 @@ export class ChatLoop {
           }));
           msgs.push(...results);
         }
+        updateStatus('max iterations');
         return 'Limite de iterações.';
-      } catch (e: any) { return `Erro: ${e.message}`; }
+      } catch (e: any) {
+        updateStatus(`erro: ${e.message}`);
+        return `Erro: ${e.message}`;
+      }
     })();
 
-    this.activeAgents.set(id, { promise, objective, startedAt: new Date() });
+    agentData.promise = promise;
+    this.activeAgents.set(id, agentData as any);
+
     promise.then(result => {
-      logger.success(`\n[${id}] Done!`);
-      smartOutput(result, id.toUpperCase());
+      logger.success(`[${id}] concluido`);
+      smartOutput(result, id);
       this.activeAgents.delete(id);
     });
   }
 
   private showAgents() {
     if (!this.activeAgents.size) { logger.info('Sem agentes.'); return; }
+    const cols = process.stdout.columns || 80;
+    console.log(chalk.hex('#003B00')('─'.repeat(cols)));
     for (const [id, a] of this.activeAgents) {
-      const s = Math.round((Date.now() - a.startedAt.getTime()) / 1000);
-      console.log(`  ${chalk.hex('#ADFF2F')(id)} ${chalk.hex('#008F11')(`${s}s`)} ${a.objective}`);
+      const sec = Math.round((Date.now() - a.startedAt.getTime()) / 1000);
+      const iter = a.iteration ? `iter:${a.iteration}` : '';
+      const preview = a.objective.length > 40 ? a.objective.substring(0, 40) + '...' : a.objective;
+      console.log(
+        chalk.hex('#ADFF2F')(` ${id}`) +
+        chalk.hex('#008F11')(` ${sec}s ${iter}`) +
+        chalk.hex('#005500')(` ${preview}`)
+      );
+      console.log(chalk.hex('#008F11')(`   └ ${a.status}`));
     }
+    console.log(chalk.hex('#003B00')('─'.repeat(cols)));
   }
 
-  // --- Response Processing (zero spinner, non-blocking) ---
-  private async processResponse() {
-    logger.dim('  ⏳ Pensando...');
+  // --- Live timer: mostra progresso enquanto aguarda API ---
+  private startLiveTimer(label: string): () => void {
+    const start = Date.now();
+    const interval = setInterval(() => {
+      const sec = ((Date.now() - start) / 1000).toFixed(0);
+      const tokens = this.service.sessionUsage.totalTokens;
+      process.stdout.write(`\r${chalk.hex('#005500')(`  ${label} ${sec}s | ${tokens > 1000 ? (tokens/1000).toFixed(1)+'k' : tokens} tokens`)}`);
+    }, 1000);
+    return () => {
+      clearInterval(interval);
+      process.stdout.write('\r\x1b[2K'); // limpa a linha do timer
+    };
+  }
 
-    const sigintHandler = () => { this.abortTask = true; logger.warn('\n  ⚠ Abortando...'); };
+  // --- Response Processing ---
+  private async processResponse() {
+    const sigintHandler = () => {
+      this.abortTask = true;
+      this.service.abort(); // Cancela a request HTTP em andamento
+      logger.warn('\nAbortado.');
+    };
     process.on('SIGINT', sigintHandler);
 
     try {
       let iterations = 0;
       this.consecutiveErrors = 0;
 
+      const lastUserMsg = [...this.messages].reverse().find(m => m.role === 'user');
+      const selectedTools = this.planMode ? undefined : (lastUserMsg ? getToolSubset(lastUserMsg.content) : this.allTools);
+
       while (!this.abortTask && iterations++ < 25) {
-        let toolsToSend: any;
-        if (this.planMode) {
-          toolsToSend = undefined;
-        } else if (iterations === 1) {
-          const lastUserMsg = [...this.messages].reverse().find(m => m.role === 'user');
-          toolsToSend = lastUserMsg ? getToolSubset(lastUserMsg.content) : this.allTools;
-        } else {
-          toolsToSend = this.allTools;
+        let toolsToSend = selectedTools;
+        if (iterations > 1 && selectedTools) {
+          const usedNames = new Set<string>();
+          for (const m of this.messages) {
+            if (m.tool_calls) for (const tc of m.tool_calls) usedNames.add(tc.function.name);
+          }
+          const extra = this.allTools.filter((t: any) => usedNames.has(t.function.name) && !selectedTools.some((s: any) => s.function.name === t.function.name));
+          toolsToSend = extra.length ? [...selectedTools, ...extra] : selectedTools;
         }
 
         this.messages = this.sanitizeMessages(this.messages);
-        const response = await this.service.chat(this.messages, toolsToSend);
+        const stopTimer = this.startLiveTimer(`thinking (${iterations}/25)`);
+        let response: any;
+        try {
+          response = await this.service.chat(this.messages, toolsToSend);
+        } catch (e: any) {
+          stopTimer();
+          if (this.abortTask) break; // Ctrl+C: sai silenciosamente
+          logger.error(`${e.message}`);
+          break;
+        }
+        stopTimer();
+
+        // Resposta vazia = morte silenciosa
+        if (!response || (!response.content && !response.tool_calls?.length)) {
+          logger.warn('Resposta vazia da API. Encerrando loop.');
+          break;
+        }
+
         this.messages.push(response);
 
         if (response.content) smartOutput(response.content, 'VOIDCODE');
@@ -816,7 +900,7 @@ export class ChatLoop {
 
             const cacheKey = this.toolCache.key(name, toolArgs);
             const cached = this.toolCache.get(cacheKey);
-            if (cached) { logger.dim(`  ${name} (cache)`); return { role: 'tool' as const, tool_call_id: tc.id, content: cached }; }
+            if (cached) return { role: 'tool' as const, tool_call_id: tc.id, content: cached };
 
             const handler = this.allHandlers[name];
             let result = handler ? await handler(toolArgs) : 'Tool não encontrada.';
@@ -833,17 +917,15 @@ export class ChatLoop {
             return { role: 'tool' as const, tool_call_id: tc.id, content: result };
           }));
 
-          const elapsed = Date.now() - startTime;
-          logger.success(`${toolCalls.length} tools em ${elapsed}ms`);
+          logger.dim(`  ${toolCalls.length} tools ${Date.now() - startTime}ms`);
           this.messages.push(...results);
           this.showFooter();
 
           if (this.consecutiveErrors >= 2) {
             this.messages.push({
               role: 'system',
-              content: `[AUTO-FIX] ${this.consecutiveErrors} erros seguidos. Analise e corrija. Não repita a mesma ação.`
+              content: `[AUTO-FIX] ${this.consecutiveErrors} erros seguidos. Analise e corrija.`
             });
-            logger.warn(`  Auto-correção: ${this.consecutiveErrors} erros.`);
           }
         } else {
           const results = [];
@@ -851,24 +933,20 @@ export class ChatLoop {
             const name = tc.function.name;
             const toolArgs = safeJSONParse(tc.function.arguments);
             logger.tool(name, JSON.stringify(toolArgs));
-            const answer = await ask(chalk.hex('#ADFF2F')(`  Autorizar ${name.toUpperCase()}? (Y/n) `));
+            const answer = await ask(chalk.hex('#ADFF2F')(`  Autorizar ${name}? (Y/n) `));
             if (answer.toLowerCase() === 'n') { results.push({ role: 'tool' as const, tool_call_id: tc.id, content: 'Recusado.' }); continue; }
-            logger.dim(`  Executando ${name}...`);
             const handler = this.allHandlers[name];
             let result = handler ? await handler(toolArgs) : 'N/A';
             result = truncateToolOutput(String(result));
-            logger.success(`${name} ok`);
             results.push({ role: 'tool' as const, tool_call_id: tc.id, content: result });
           }
           this.messages.push(...results);
         }
-        logger.dim('  ⏳ Continuando...');
       }
     } catch (error: any) {
-      if (!this.abortTask) logger.error(`[ERRO] ${error.message}`);
+      if (!this.abortTask) logger.error(`Erro: ${error.message}`);
     } finally {
       process.removeListener('SIGINT', sigintHandler);
-      if (this.abortTask) logger.info('Tarefa interrompida.');
       this.abortTask = false;
     }
   }

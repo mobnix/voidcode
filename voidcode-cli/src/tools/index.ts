@@ -4,293 +4,72 @@ import { execSync, spawn } from 'node:child_process';
 import fg from 'fast-glob';
 import axios from 'axios';
 
+// Tool definitions - balanceado entre compacto e claro pro LLM
+const t = (name: string, desc: string, params: Record<string, any>, required?: string[]) => ({
+  type: 'function' as const,
+  function: { name, description: desc, parameters: { type: 'object', properties: params, ...(required ? { required } : {}) } }
+});
+
 export const tools = [
-  {
-    type: 'function',
-    function: {
-      name: 'list_directory',
-      description: 'Lista arquivos e pastas em um diretório.',
-      parameters: {
-        type: 'object',
-        properties: {
-          path: { type: 'string', description: 'Caminho do diretório (default: .)' }
-        }
-      }
-    }
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'file_info',
-      description: 'Retorna informações de um arquivo SEM ler o conteúdo (tamanho, linhas, tipo). Use antes de decidir se lê o arquivo inteiro ou só parte.',
-      parameters: {
-        type: 'object',
-        properties: {
-          path: { type: 'string', description: 'Caminho do arquivo.' }
-        },
-        required: ['path']
-      }
-    }
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'read_file',
-      description: 'Lê o conteúdo COMPLETO de um arquivo com linhas numeradas. Para arquivos grandes, prefira read_file_lines.',
-      parameters: {
-        type: 'object',
-        properties: {
-          path: { type: 'string', description: 'Caminho do arquivo.' }
-        },
-        required: ['path']
-      }
-    }
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'write_file',
-      description: 'Cria ou sobrescreve um arquivo com novo conteúdo.',
-      parameters: {
-        type: 'object',
-        properties: {
-          path: { type: 'string', description: 'Caminho do arquivo.' },
-          content: { type: 'string', description: 'Conteúdo completo do arquivo.' }
-        },
-        required: ['path', 'content']
-      }
-    }
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'replace_file_content',
-      description: 'Substitui uma string específica dentro de um arquivo existente.',
-      parameters: {
-        type: 'object',
-        properties: {
-          path: { type: 'string', description: 'Caminho do arquivo.' },
-          old_string: { type: 'string', description: 'Texto a ser substituído.' },
-          new_string: { type: 'string', description: 'Novo texto.' }
-        },
-        required: ['path', 'old_string', 'new_string']
-      }
-    }
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'grep_search',
-      description: 'Pesquisa por um padrão regex nos arquivos (usa ripgrep).',
-      parameters: {
-        type: 'object',
-        properties: {
-          pattern: { type: 'string', description: 'O padrão regex para buscar.' },
-          path: { type: 'string', description: 'Diretório para buscar (default: .)' }
-        },
-        required: ['pattern']
-      }
-    }
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'glob_files',
-      description: 'Busca arquivos por padrão glob (ex: "**/*.ts", "src/**/*.js").',
-      parameters: {
-        type: 'object',
-        properties: {
-          pattern: { type: 'string', description: 'Padrão glob para buscar arquivos.' },
-          path: { type: 'string', description: 'Diretório base (default: .)' }
-        },
-        required: ['pattern']
-      }
-    }
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'run_shell_command',
-      description: 'Executa um comando shell. Use background:true para servidores e processos que ficam rodando (npm start, node server.js, etc).',
-      parameters: {
-        type: 'object',
-        properties: {
-          command: { type: 'string', description: 'O comando shell a executar.' },
-          background: { type: 'boolean', description: 'Se true, roda em background (para servidores). Default: false.' }
-        },
-        required: ['command']
-      }
-    }
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'spawn_sub_agent',
-      description: 'Cria um sub-agente especializado para resolver uma tarefa específica em paralelo.',
-      parameters: {
-        type: 'object',
-        properties: {
-          objective: { type: 'string', description: 'O objetivo detalhado do sub-agente.' }
-        },
-        required: ['objective']
-      }
-    }
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'memory_read',
-      description: 'Lê a memória persistente do agente (contexto de sessões anteriores).',
-      parameters: { type: 'object', properties: {} }
-    }
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'memory_write',
-      description: 'Salva informação na memória persistente. Categorias: user (preferências), project (estado do projeto), feedback (correções do usuário).',
-      parameters: {
-        type: 'object',
-        properties: {
-          key: { type: 'string', description: 'Chave/título da memória.' },
-          content: { type: 'string', description: 'Conteúdo a memorizar.' },
-          category: { type: 'string', description: 'Categoria: user, project, feedback. Default: other.' }
-        },
-        required: ['key', 'content']
-      }
-    }
-  },
-  // --- Smart File Tools ---
-  {
-    type: 'function',
-    function: {
-      name: 'read_file_lines',
-      description: 'Lê linhas específicas de um arquivo (mais eficiente que ler o arquivo inteiro). Retorna com números de linha.',
-      parameters: {
-        type: 'object',
-        properties: {
-          path: { type: 'string', description: 'Caminho do arquivo.' },
-          start: { type: 'number', description: 'Linha inicial (1-based).' },
-          end: { type: 'number', description: 'Linha final (inclusive).' }
-        },
-        required: ['path', 'start', 'end']
-      }
-    }
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'patch_file',
-      description: 'Edita linhas específicas de um arquivo por número de linha. Mais preciso que replace_file_content.',
-      parameters: {
-        type: 'object',
-        properties: {
-          path: { type: 'string', description: 'Caminho do arquivo.' },
-          line_start: { type: 'number', description: 'Linha inicial a substituir (1-based).' },
-          line_end: { type: 'number', description: 'Linha final a substituir (inclusive).' },
-          new_content: { type: 'string', description: 'Novo conteúdo para substituir as linhas.' }
-        },
-        required: ['path', 'line_start', 'line_end', 'new_content']
-      }
-    }
-  },
-  // --- Git Tools ---
-  {
-    type: 'function',
-    function: {
-      name: 'git_status',
-      description: 'Mostra o status do repositório git (arquivos modificados, staged, untracked).',
-      parameters: { type: 'object', properties: {} }
-    }
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'git_diff',
-      description: 'Mostra o diff das mudanças atuais (staged e unstaged).',
-      parameters: {
-        type: 'object',
-        properties: {
-          staged: { type: 'boolean', description: 'Se true, mostra apenas staged changes.' },
-          file: { type: 'string', description: 'Arquivo específico para diff (opcional).' }
-        }
-      }
-    }
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'git_log',
-      description: 'Mostra histórico de commits recentes.',
-      parameters: {
-        type: 'object',
-        properties: {
-          count: { type: 'number', description: 'Número de commits (default: 10).' }
-        }
-      }
-    }
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'git_commit',
-      description: 'Faz stage de arquivos e cria um commit.',
-      parameters: {
-        type: 'object',
-        properties: {
-          message: { type: 'string', description: 'Mensagem do commit.' },
-          files: { type: 'string', description: 'Arquivos para stage (separados por espaço). Use "." para todos.' }
-        },
-        required: ['message']
-      }
-    }
-  },
-  // --- Web Tool ---
-  {
-    type: 'function',
-    function: {
-      name: 'web_fetch',
-      description: 'Faz uma requisição HTTP GET para uma URL e retorna o conteúdo (text/html/json).',
-      parameters: {
-        type: 'object',
-        properties: {
-          url: { type: 'string', description: 'A URL para acessar.' },
-          extract_text: { type: 'boolean', description: 'Se true, extrai apenas texto de HTML (remove tags).' }
-        },
-        required: ['url']
-      }
-    }
-  }
+  t('list_directory', 'Lista arquivos e pastas de um diretório', { path: { type: 'string', description: 'Diretório (default: .)' } }),
+  t('file_info', 'Retorna linhas e tamanho de um arquivo sem ler o conteúdo', { path: { type: 'string' } }, ['path']),
+  t('read_file', 'Lê conteúdo completo de um arquivo com linhas numeradas', { path: { type: 'string' } }, ['path']),
+  t('read_file_lines', 'Lê um range de linhas de um arquivo', { path: { type: 'string' }, start: { type: 'number', description: 'Linha inicial' }, end: { type: 'number', description: 'Linha final' } }, ['path', 'start', 'end']),
+  t('write_file', 'Cria ou sobrescreve um arquivo', { path: { type: 'string' }, content: { type: 'string' } }, ['path', 'content']),
+  t('replace_file_content', 'Substitui uma string em um arquivo existente', { path: { type: 'string' }, old_string: { type: 'string' }, new_string: { type: 'string' } }, ['path', 'old_string', 'new_string']),
+  t('patch_file', 'Substitui linhas por número em um arquivo', { path: { type: 'string' }, line_start: { type: 'number' }, line_end: { type: 'number' }, new_content: { type: 'string' } }, ['path', 'line_start', 'line_end', 'new_content']),
+  t('grep_search', 'Busca regex nos arquivos com ripgrep', { pattern: { type: 'string' }, path: { type: 'string', description: 'Diretório (default: .)' } }, ['pattern']),
+  t('glob_files', 'Busca arquivos por padrão glob', { pattern: { type: 'string', description: 'Ex: **/*.ts' }, path: { type: 'string' } }, ['pattern']),
+  t('run_shell_command', 'Executa comando shell. Use background:true para servidores que ficam rodando', { command: { type: 'string' }, background: { type: 'boolean', description: 'true para processos long-running' } }, ['command']),
+  t('spawn_sub_agent', 'Cria sub-agente para executar tarefa em paralelo', { objective: { type: 'string' } }, ['objective']),
+  t('memory_read', 'Lê memória persistente entre sessões', {}),
+  t('memory_write', 'Salva na memória persistente', { key: { type: 'string' }, content: { type: 'string' }, category: { type: 'string', description: 'user, project ou feedback' } }, ['key', 'content']),
+  t('git_status', 'Mostra status do repositório git', {}),
+  t('git_diff', 'Mostra diff das mudanças', { staged: { type: 'boolean' }, file: { type: 'string' } }),
+  t('git_log', 'Mostra commits recentes', { count: { type: 'number', description: 'Quantidade (default: 10)' } }),
+  t('git_commit', 'Faz git add e commit', { message: { type: 'string' }, files: { type: 'string', description: 'Arquivos (default: .)' } }, ['message']),
+  t('web_fetch', 'Faz HTTP GET em uma URL e retorna o conteúdo', { url: { type: 'string' }, extract_text: { type: 'boolean', description: 'true para extrair texto de HTML' } }, ['url']),
 ];
 
-// --- Smart Tool Selection: retorna subset de tools baseado no contexto ---
-// Cada tool definition custa ~100-150 tokens. 15 tools = ~2k tokens por request.
-// Filtrando para 8-10 relevantes = economia de ~500-700 tokens/request.
-const TOOL_CATEGORIES: Record<string, string[]> = {
-  fs: ['list_directory', 'file_info', 'read_file', 'read_file_lines', 'write_file', 'replace_file_content', 'patch_file', 'glob_files', 'grep_search'],
-  git: ['git_status', 'git_diff', 'git_log', 'git_commit'],
-  system: ['run_shell_command', 'spawn_sub_agent'],
-  memory: ['memory_read', 'memory_write'],
-  web: ['web_fetch'],
-};
-
+// --- Smart Tool Selection ---
+// Core mínimo: 4 tools (~200 tokens). Expande conforme contexto.
 export function getToolSubset(userMessage: string): any[] {
-  // Sempre inclui: fs + system (core)
-  const selected = new Set<string>([...TOOL_CATEGORIES.fs!, ...TOOL_CATEGORIES.system!]);
+  // Sempre: core mínimo
+  const selected = new Set(['list_directory', 'read_file', 'write_file', 'run_shell_command']);
 
-  // Git: só se mencionou git, commit, branch, merge, diff, etc
+  // Edição de código mencionada ou implícita
+  if (/\b(edit|alter|mud|troc|fix|corrig|refator|patch|substituir|replace|modific)\b/i.test(userMessage)) {
+    ['file_info', 'read_file_lines', 'patch_file', 'replace_file_content', 'grep_search'].forEach(t => selected.add(t));
+  }
+
+  // Criação de projeto / múltiplos arquivos
+  if (/\b(cri|gerar|projeto|app|dashboard|server|api|build|instalar|npm|setup)\b/i.test(userMessage)) {
+    ['glob_files', 'file_info'].forEach(t => selected.add(t));
+  }
+
+  // Busca
+  if (/\b(busc|procur|search|find|grep|onde|qual arquivo)\b/i.test(userMessage)) {
+    ['grep_search', 'glob_files'].forEach(t => selected.add(t));
+  }
+
+  // Git
   if (/\b(git|commit|push|pull|branch|merge|diff|log|status|deploy)\b/i.test(userMessage)) {
-    TOOL_CATEGORIES.git!.forEach(t => selected.add(t));
+    ['git_status', 'git_diff', 'git_log', 'git_commit'].forEach(t => selected.add(t));
   }
 
-  // Web: só se mencionou url, http, fetch, buscar, pesquisar, site, api
-  if (/\b(http|url|fetch|buscar|pesquisa|site|api|web|download|link)\b/i.test(userMessage)) {
-    TOOL_CATEGORIES.web!.forEach(t => selected.add(t));
+  // Web
+  if (/\b(http|url|fetch|buscar|pesquis|site|api|web|download|link)\b/i.test(userMessage)) {
+    selected.add('web_fetch');
   }
 
-  // Memory: só se mencionou lembrar, memória, salvar contexto
-  if (/\b(lembr|memori|memór|salvar|guardar|remember|context)\b/i.test(userMessage)) {
-    TOOL_CATEGORIES.memory!.forEach(t => selected.add(t));
+  // Memória
+  if (/\b(lembr|memori|memór|salvar|guardar|remember)\b/i.test(userMessage)) {
+    ['memory_read', 'memory_write'].forEach(t => selected.add(t));
+  }
+
+  // Agente
+  if (/\b(agent|paralel|background|delegar)\b/i.test(userMessage)) {
+    selected.add('spawn_sub_agent');
   }
 
   return tools.filter(t => selected.has(t.function.name));
@@ -311,9 +90,16 @@ function ensureMemoryDir() {
 
 function shell(cmd: string, timeout = 30000): string {
   try {
-    return execSync(cmd, { encoding: 'utf-8', timeout, maxBuffer: 1024 * 1024 * 5 });
+    let output = execSync(cmd, { encoding: 'utf-8', timeout, maxBuffer: 1024 * 1024 * 5 });
+    // Limita output de shell pra não estourar contexto
+    if (output.length > 4000) {
+      output = output.substring(0, 2000) + `\n... [${output.length - 3000} chars ocultos] ...\n` + output.substring(output.length - 1000);
+    }
+    return output;
   } catch (e: any) {
-    return e.stderr || e.stdout || e.message;
+    const err = e.stderr || e.stdout || e.message;
+    // Limita erro também
+    return err.length > 2000 ? err.substring(0, 1000) + '\n... [truncado] ...\n' + err.substring(err.length - 500) : err;
   }
 }
 
@@ -369,12 +155,12 @@ export const toolHandlers: Record<string, (args: any) => any> = {
       const content = fs.readFileSync(resolved, 'utf-8');
       // Retorna com linhas numeradas para facilitar patch_file
       const lines = content.split('\n');
-      if (lines.length > 500) {
-        // Arquivo grande: retorna resumo + sugere read_file_lines
-        return `[${lines.length} linhas - mostrando primeiras 100 e últimas 50. Use read_file_lines para range específico]\n\n` +
-          lines.slice(0, 100).map((l, i) => `${i + 1}: ${l}`).join('\n') +
-          `\n\n... [${lines.length - 150} linhas ocultas] ...\n\n` +
-          lines.slice(-50).map((l, i) => `${lines.length - 50 + i + 1}: ${l}`).join('\n');
+      if (lines.length > 150) {
+        // Arquivo grande: retorna só início e final, sugere read_file_lines
+        return `[${lines.length} linhas. Use read_file_lines para range específico]\n` +
+          lines.slice(0, 50).map((l, i) => `${i + 1}: ${l}`).join('\n') +
+          `\n... [${lines.length - 80} linhas ocultas] ...\n` +
+          lines.slice(-30).map((l, i) => `${lines.length - 30 + i + 1}: ${l}`).join('\n');
       }
       return lines.map((l, i) => `${i + 1}: ${l}`).join('\n');
     } catch (e: any) {
@@ -495,14 +281,21 @@ export const toolHandlers: Record<string, (args: any) => any> = {
     try {
       ensureMemoryDir();
       const files = fs.readdirSync(MEMORY_DIR).filter(f => f.endsWith('.json'));
-      if (files.length === 0) return 'Memória vazia. Nenhuma informação salva ainda.';
-      const memories: Record<string, string> = {};
+      if (files.length === 0) return 'Vazia';
+      // Retorna compacto: key=valor (max 100 chars por entry, max 2000 total)
+      const entries: string[] = [];
+      let totalLen = 0;
       for (const file of files) {
-        const content = fs.readFileSync(path.join(MEMORY_DIR, file), 'utf-8');
-        const key = file.replace('.json', '');
-        try { memories[key] = JSON.parse(content).content; } catch { memories[key] = content; }
+        const raw = fs.readFileSync(path.join(MEMORY_DIR, file), 'utf-8');
+        try {
+          const data = JSON.parse(raw);
+          const entry = `${data.key}: ${data.content}`.substring(0, 100);
+          if (totalLen + entry.length > 2000) break;
+          entries.push(entry);
+          totalLen += entry.length;
+        } catch { /* skip */ }
       }
-      return JSON.stringify(memories, null, 2);
+      return entries.join('\n');
     } catch (e: any) {
       return `Erro: ${e.message}`;
     }
@@ -596,9 +389,8 @@ export const toolHandlers: Record<string, (args: any) => any> = {
           .trim();
       }
 
-      // Limita a 20k chars para não estourar contexto
-      if (body.length > 20000) {
-        body = body.substring(0, 20000) + '\n\n... [TRUNCADO]';
+      if (body.length > 5000) {
+        body = body.substring(0, 5000) + '\n... [truncado]';
       }
 
       return `[${response.status}] ${url}\n\n${body}`;

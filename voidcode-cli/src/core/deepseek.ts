@@ -97,17 +97,40 @@ export class DeepSeekService {
     this.providerName = provider;
   }
 
-  async chat(messages: any[], tools?: any[]) {
+  private _abortController: AbortController | null = null;
+
+  // Aborta a request HTTP em andamento
+  abort() {
+    if (this._abortController) {
+      this._abortController.abort();
+      this._abortController = null;
+    }
+  }
+
+  async chat(messages: any[], tools?: any[]): Promise<any> {
+    return this._chatWithRetry(messages, tools, 0);
+  }
+
+  private async _chatWithRetry(messages: any[], tools: any[] | undefined, attempt: number): Promise<any> {
+    const TIMEOUT = 180_000; // 3 minutos
+    this._abortController = new AbortController();
+
     try {
-      const response = await this.client.chat.completions.create({
+      const apiCall = this.client.chat.completions.create({
         model: this.model,
         messages,
         temperature: 0.1,
-        max_tokens: 8192,
+        max_tokens: Math.min(8192, attempt > 0 ? 2048 : 8192),
         stream: false,
         tools: tools,
         tool_choice: tools ? 'auto' : undefined
-      });
+      }, { signal: this._abortController.signal as any });
+
+      const timeoutPromise = new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error(`Timeout: API não respondeu em ${TIMEOUT/1000}s`)), TIMEOUT)
+      );
+
+      const response = await Promise.race([apiCall, timeoutPromise]);
 
       if (response.usage) {
         this._lastUsage = {
@@ -122,9 +145,29 @@ export class DeepSeekService {
       this._requestCount++;
 
       return response.choices[0].message;
-    } catch (error) {
-      throw new Error(`Erro na API (${this.providerName}/${this.model}): ${(error as any).message}`);
+    } catch (error: any) {
+      const msg = error?.message || '';
+      // Request too large: reduz contexto e tenta de novo
+      if ((msg.includes('413') || msg.includes('too large') || msg.includes('Request too large') || msg.includes('reduce your message')) && attempt < 2) {
+        const reduced = this.reduceMessages(messages);
+        const reducedTools = attempt === 0 ? tools : undefined;
+        return this._chatWithRetry(reduced, reducedTools, attempt + 1);
+      }
+      // Timeout: retry 1 vez com contexto reduzido
+      if (msg.includes('Timeout') && attempt < 1) {
+        const reduced = this.reduceMessages(messages);
+        return this._chatWithRetry(reduced, tools, attempt + 1);
+      }
+      throw new Error(`Erro na API (${this.providerName}/${this.model}): ${msg}`);
     }
+  }
+
+  // Reduz mensagens mantendo system prompt + últimas 4
+  private reduceMessages(messages: any[]): any[] {
+    if (messages.length <= 5) return messages;
+    const system = messages.filter(m => m.role === 'system').slice(0, 1);
+    const last = messages.slice(-4);
+    return [...system, { role: 'system', content: '[Contexto reduzido para caber no limite do modelo]' }, ...last];
   }
 
   async chatStream(messages: any[], tools?: any[]): Promise<any> {

@@ -6,26 +6,70 @@ export function detectProjectContext(): string {
   const cwd = process.cwd();
   const parts: string[] = [];
 
-  // 1. Carrega VOIDCODE.md do projeto (equivalente ao CLAUDE.md)
   const voidcodeMd = findFileUp('VOIDCODE.md', cwd);
   if (voidcodeMd) {
     const content = fs.readFileSync(voidcodeMd, 'utf-8').trim();
-    if (content.length < 2000) {
-      parts.push(`[PROJECT INSTRUCTIONS]\n${content}`);
-    } else {
-      parts.push(`[PROJECT INSTRUCTIONS]\n${content.substring(0, 2000)}...`);
-    }
+    parts.push(`[PROJ]: ${content.substring(0, 500)}`);
   }
 
-  // 2. Detecta tipo de projeto
   const projectInfo = detectProjectType(cwd);
-  if (projectInfo) parts.push(`[PROJECT]: ${projectInfo}`);
+  if (projectInfo) parts.push(`[STACK]: ${projectInfo}`);
 
-  // 3. Git info
   const gitInfo = detectGit(cwd);
   if (gitInfo) parts.push(`[GIT]: ${gitInfo}`);
 
+  // Índice do projeto - mapa de todos os arquivos
+  const index = generateProjectIndex(cwd);
+  if (index) parts.push(`[INDEX]:\n${index}`);
+
   return parts.join('\n');
+}
+
+// Gera índice compacto: árvore de arquivos com tamanho
+// O LLM já sabe tudo que existe sem precisar chamar list_directory/read_file
+function generateProjectIndex(cwd: string): string {
+  const IGNORE = new Set(['node_modules', '.git', 'dist', 'build', '.next', '__pycache__', 'venv', '.venv', 'coverage', '.cache', '.turbo']);
+  const MAX_DEPTH = 4;
+  const MAX_FILES = 80;
+  const files: string[] = [];
+
+  function walk(dir: string, depth: number, prefix: string) {
+    if (depth > MAX_DEPTH || files.length >= MAX_FILES) return;
+    try {
+      const entries = fs.readdirSync(dir, { withFileTypes: true })
+        .filter(e => !e.name.startsWith('.') || e.name === '.env.example')
+        .filter(e => !IGNORE.has(e.name))
+        .sort((a, b) => {
+          // Dirs primeiro, depois arquivos
+          if (a.isDirectory() && !b.isDirectory()) return -1;
+          if (!a.isDirectory() && b.isDirectory()) return 1;
+          return a.name.localeCompare(b.name);
+        });
+
+      for (const entry of entries) {
+        if (files.length >= MAX_FILES) break;
+        const fullPath = path.join(dir, entry.name);
+        const rel = path.relative(cwd, fullPath);
+
+        if (entry.isDirectory()) {
+          files.push(`${prefix}${entry.name}/`);
+          walk(fullPath, depth + 1, prefix + '  ');
+        } else {
+          try {
+            const stat = fs.statSync(fullPath);
+            const sizeKB = (stat.size / 1024).toFixed(0);
+            files.push(`${prefix}${entry.name} (${sizeKB}KB)`);
+          } catch {
+            files.push(`${prefix}${entry.name}`);
+          }
+        }
+      }
+    } catch { /* permission denied etc */ }
+  }
+
+  walk(cwd, 0, '');
+  if (!files.length) return '';
+  return files.join('\n');
 }
 
 function findFileUp(filename: string, startDir: string): string | null {
@@ -49,15 +93,12 @@ function detectProjectType(cwd: string): string {
     try {
       const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf-8'));
       const deps = Object.keys({ ...pkg.dependencies, ...pkg.devDependencies });
-      const stack: string[] = [pkg.name || 'node'];
-      if (deps.includes('typescript')) stack.push('TypeScript');
-      if (deps.includes('react')) stack.push('React');
-      if (deps.includes('next')) stack.push('Next.js');
-      if (deps.includes('express')) stack.push('Express');
-      if (deps.includes('fastify')) stack.push('Fastify');
+      const stack: string[] = [];
+      if (deps.includes('typescript')) stack.push('TS');
+      if (deps.includes('react') || deps.includes('next')) stack.push('React');
+      if (deps.includes('express') || deps.includes('fastify')) stack.push('Express');
       if (deps.includes('vue')) stack.push('Vue');
-      if (deps.includes('svelte')) stack.push('Svelte');
-      detections.push(`Node.js (${stack.join(', ')}) scripts: ${Object.keys(pkg.scripts || {}).join(', ')}`);
+      detections.push(`Node(${stack.join(',') || 'JS'})`);
     } catch { detections.push('Node.js'); }
   }
 

@@ -14,6 +14,7 @@ export class ChatLoop {
   private keyboard = KeyboardManager.getInstance();
   private isPaused = false;
   private abortTask = false;
+  private readonly MAX_HISTORY_LENGTH = 15;
   private spinner = ora({
     text: 'Acessando a rede DeepSeek...',
     color: 'green',
@@ -31,6 +32,10 @@ export class ChatLoop {
 
   async start() {
     while (true) {
+      if (this.messages.length > this.MAX_HISTORY_LENGTH) {
+        await this.compactHistory();
+      }
+
       const { userInput } = await inquirer.prompt([
         {
           type: 'input',
@@ -176,6 +181,40 @@ export class ChatLoop {
   private handleEscape() {
     this.spinner.stop();
     // Reutiliza a lógica de pausa dentro do processResponse
+  }
+
+  private async compactHistory() {
+    this.spinner.text = chalk.cyan('[SISTEMA]: Otimizando Contexto (Compactação de Tokens)...');
+    this.spinner.start();
+
+    try {
+      const summaryPrompt = {
+        role: 'user',
+        content: 'SISTEMA: Resuma nossa conversa até agora em um parágrafo técnico denso. Foque nos objetivos alcançados, arquivos modificados, estado atual do código e decisões arquiteturais. Mantenha os detalhes críticos para continuidade da tarefa.'
+      };
+
+      const summaryResponse = await this.service.chat([...this.messages, summaryPrompt]);
+      this.spinner.stop();
+
+      if (summaryResponse && summaryResponse.content) {
+        const systemPrompt = this.messages[0];
+        const lastMessages = this.messages.slice(-4);
+        
+        this.messages = [
+          systemPrompt,
+          { 
+            role: 'system', 
+            content: `[RESUMO DE CONTEXTO ANTERIOR]: ${summaryResponse.content}` 
+          },
+          ...lastMessages
+        ];
+
+        logger.info('[SISTEMA]: Contexto compactado com sucesso.');
+      }
+    } catch (error) {
+      this.spinner.stop();
+      logger.error('Falha na compactação de contexto.');
+    }
   }
 
   public async runAutonomously(): Promise<string> {

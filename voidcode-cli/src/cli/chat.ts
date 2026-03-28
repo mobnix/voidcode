@@ -11,6 +11,7 @@ import { loadSkills } from '../skills/index.js';
 import { safeJSONParse } from '../utils/json.js';
 import { detectProjectContext, loadStructuredMemory } from '../core/context.js';
 import { execSync } from 'node:child_process';
+import { TelegramBridge } from '../core/telegram.js';
 
 // --- Readline persistente ---
 let rl: readline.Interface | null = null;
@@ -153,6 +154,7 @@ export class ChatLoop {
   private taskCounter = 0;
   private toolCache = new ToolCache();
   private consecutiveErrors = 0;
+  private telegramBot: TelegramBridge | null = null;
   private spinner = ora({ text: 'Processando...', color: 'green', spinner: 'dots' });
 
   constructor(insaneMode = false) {
@@ -314,6 +316,8 @@ export class ChatLoop {
       }
       case 'usage': this.showUsage(); break;
       case 'auth': case 'model': { await this.authMenu(); break; }
+      case 'menu': { await this.showMenu(); break; }
+      case 'telegram': case 'tg': { await this.telegramMenu(); break; }
       case 'commit': {
         const msg = args.join(' ');
         if (!msg) { logger.error('/commit <msg>'); break; }
@@ -376,14 +380,13 @@ export class ChatLoop {
       case 'help': {
         console.log(chalk.hex('#00FF41')(`
  Comandos:
-  ${chalk.hex('#ADFF2F')('/auth')}  provider    ${chalk.hex('#ADFF2F')('/usage')}  tokens   ${chalk.hex('#ADFF2F')('/plan')}  toggle plan
+  ${chalk.hex('#ADFF2F')('/menu')}  wizard      ${chalk.hex('#ADFF2F')('/auth')}  provider   ${chalk.hex('#ADFF2F')('/telegram')}  bot TG
+  ${chalk.hex('#ADFF2F')('/usage')}  tokens    ${chalk.hex('#ADFF2F')('/plan')}  toggle     ${chalk.hex('#ADFF2F')('/compact')}  contexto
   ${chalk.hex('#ADFF2F')('/task <t>')}  add    ${chalk.hex('#ADFF2F')('/task done <id>')}     ${chalk.hex('#ADFF2F')('/task rm <id>')}
   ${chalk.hex('#ADFF2F')('/commit <m>')}       ${chalk.hex('#ADFF2F')('/diff')}            ${chalk.hex('#ADFF2F')('/log')}  ${chalk.hex('#ADFF2F')('/status')}
   ${chalk.hex('#ADFF2F')('/agent <p>')}  bg    ${chalk.hex('#ADFF2F')('/agents')}           ${chalk.hex('#ADFF2F')('/btw <q>')}  quick
-  ${chalk.hex('#ADFF2F')('/createskill')}      ${chalk.hex('#ADFF2F')('/memory')}           ${chalk.hex('#ADFF2F')('/skills')}  ${chalk.hex('#ADFF2F')('/compact')}
+  ${chalk.hex('#ADFF2F')('/createskill')}      ${chalk.hex('#ADFF2F')('/memory')}           ${chalk.hex('#ADFF2F')('/skills')}
   ${chalk.hex('#ADFF2F')('/exit')}  sair       ${chalk.hex('#ADFF2F')('Ctrl+C')}  cancela   ${chalk.hex('#ADFF2F')('Ctrl+D 2x')}  quit
-
- Tarefas complexas são auto-detectadas: planeja antes de executar.
 `)); break;
       }
       default: logger.error(`/${command}? /help`);
@@ -451,6 +454,166 @@ export class ChatLoop {
     this.service.reconnect(apiKey, baseURL, model, provider.id);
     logger.success(`Conectado: ${provider.name} / ${model}`);
     this.showFooter();
+  }
+
+  // --- /menu - wizard central ---
+  private async showMenu() {
+    const sep = chalk.hex('#003B00')('─'.repeat(process.stdout.columns || 80));
+    console.log(`\n${sep}`);
+    console.log(chalk.hex('#00FF41').bold('  VOIDCODE MENU'));
+    console.log(sep);
+    console.log(`  ${chalk.hex('#ADFF2F')('1)')} Provider & Auth (API keys, modelos)`);
+    console.log(`  ${chalk.hex('#ADFF2F')('2)')} Telegram Bot (controle remoto)`);
+    console.log(`  ${chalk.hex('#ADFF2F')('3)')} Token Usage`);
+    console.log(`  ${chalk.hex('#ADFF2F')('4)')} Skills (listar / criar)`);
+    console.log(`  ${chalk.hex('#ADFF2F')('5)')} Memória (ver / limpar)`);
+    console.log(`  ${chalk.hex('#ADFF2F')('6)')} Sessões anteriores`);
+    console.log(`  ${chalk.hex('#ADFF2F')('7)')} Config (.env)`);
+    console.log(`  ${chalk.hex('#008F11')('0)')} Voltar\n`);
+
+    const choice = await ask(chalk.hex('#008F11')('Opção: '));
+
+    switch (choice) {
+      case '1': await this.authMenu(); break;
+      case '2': await this.telegramMenu(); break;
+      case '3': this.showUsage(); break;
+      case '4': {
+        const sub = await ask(chalk.hex('#008F11')('(L)istar ou (C)riar skill? '));
+        if (sub.toLowerCase() === 'c') {
+          const { createSkill } = await import('../skills/skill-creator.js');
+          const name = await ask(chalk.hex('#008F11')('Nome: '));
+          const desc = await ask(chalk.hex('#008F11')('Descrição: '));
+          await createSkill(name || 'NovaSkill', desc || 'Skill');
+        } else {
+          const list = this.allTools.map(t =>
+            `  ${chalk.hex('#ADFF2F')(t.function.name.padEnd(22))} ${chalk.hex('#008F11')(t.function.description)}`
+          ).join('\n');
+          console.log('\n' + list + '\n');
+        }
+        break;
+      }
+      case '5': {
+        const mem = this.allHandlers['memory_read']?.({});
+        smartOutput(mem || 'Vazia', 'MEM');
+        const clear = await ask(chalk.hex('#008F11')('Limpar memória? (y/N) '));
+        if (clear.toLowerCase() === 'y') {
+          const memDir = path.join(SESSION_DIR, 'memory');
+          if (fs.existsSync(memDir)) {
+            for (const f of fs.readdirSync(memDir)) fs.unlinkSync(path.join(memDir, f));
+            logger.success('Memória limpa.');
+          }
+        }
+        break;
+      }
+      case '6': {
+        const sessions = loadAllSessions();
+        if (!sessions.length) { logger.info('Sem sessões.'); break; }
+        sessions.forEach((s, i) => console.log(formatSessionForDisplay(s, i)));
+        const clear = await ask(chalk.hex('#008F11')('\nLimpar sessões? (y/N) '));
+        if (clear.toLowerCase() === 'y') {
+          fs.writeFileSync(SESSIONS_FILE, '[]');
+          logger.success('Sessões limpas.');
+        }
+        break;
+      }
+      case '7': {
+        const envPath = path.join(SESSION_DIR, '.env');
+        if (fs.existsSync(envPath)) {
+          const content = fs.readFileSync(envPath, 'utf-8');
+          // Mascara keys
+          const masked = content.replace(/=(.{6})(.+)(.{4})/g, '=$1...$3');
+          smartOutput(masked, 'CONFIG');
+        } else {
+          logger.info('Sem .env configurado.');
+        }
+        break;
+      }
+    }
+  }
+
+  // --- /telegram ---
+  private async telegramMenu() {
+    const sep = chalk.hex('#003B00')('─'.repeat(process.stdout.columns || 80));
+    console.log(`\n${sep}`);
+    console.log(chalk.hex('#00FF41').bold('  TELEGRAM BOT'));
+    console.log(sep);
+
+    if (this.telegramBot?.isRunning) {
+      console.log(chalk.hex('#00FF41')('  Status: ONLINE'));
+      const action = await ask(chalk.hex('#008F11')('  (D)esconectar ou (V)oltar? '));
+      if (action.toLowerCase() === 'd') {
+        this.telegramBot.stop();
+        this.telegramBot = null;
+      }
+      return;
+    }
+
+    console.log(chalk.hex('#005500')('  Status: OFFLINE\n'));
+    console.log(chalk.hex('#008F11')('  Para criar um bot:'));
+    console.log(chalk.hex('#005500')('  1. Abra @BotFather no Telegram'));
+    console.log(chalk.hex('#005500')('  2. Envie /newbot e siga as instruções'));
+    console.log(chalk.hex('#005500')('  3. Copie o token aqui\n'));
+
+    // Checa se já tem token salvo
+    const existingToken = process.env.TELEGRAM_BOT_TOKEN;
+    let token = existingToken || '';
+
+    if (existingToken) {
+      const masked = existingToken.substring(0, 8) + '...';
+      console.log(chalk.hex('#008F11')(`  Token salvo: ${masked}`));
+      const change = await ask(chalk.hex('#008F11')('  Usar este token? (Y/n) '));
+      if (change.toLowerCase() === 'n') {
+        token = await ask(chalk.hex('#008F11')('  Novo token: '));
+      }
+    } else {
+      token = await ask(chalk.hex('#008F11')('  Bot Token: '));
+    }
+
+    if (!token || token.length < 20) {
+      logger.error('Token inválido.');
+      return;
+    }
+
+    // Salva token
+    if (token !== existingToken) {
+      saveConfig({ envKey: 'TELEGRAM_BOT_TOKEN', apiKey: token });
+    }
+
+    // Inicia o bot
+    this.telegramBot = new TelegramBridge(token, async (text: string) => {
+      // Processa como se fosse input do usuário
+      this.messages.push({ role: 'user', content: `[TELEGRAM] ${text}` });
+      this.toolCache.invalidate();
+
+      const snapshot = getCwdSnapshot();
+      if (snapshot) this.messages.push({ role: 'system', content: `[CWD]: ${snapshot}` });
+
+      // Processa e captura resposta
+      this.messages = this.sanitizeMessages(this.messages);
+      const response = await this.service.chat(this.messages, this.allTools as any);
+      this.messages.push(response);
+
+      // Se tem tool calls, executa
+      if (response.tool_calls?.length) {
+        const results = await Promise.all(response.tool_calls.map(async (tc: any) => {
+          const handler = this.allHandlers[tc.function.name];
+          const args = safeJSONParse(tc.function.arguments);
+          const result = handler ? await handler(args) : 'N/A';
+          return { role: 'tool' as const, tool_call_id: tc.id, content: truncateToolOutput(String(result)) };
+        }));
+        this.messages.push(...results);
+
+        // Segunda chamada para resposta final
+        this.messages = this.sanitizeMessages(this.messages);
+        const finalResponse = await this.service.chat(this.messages, this.allTools as any);
+        this.messages.push(finalResponse);
+        return finalResponse.content || 'Executado (sem resposta texto).';
+      }
+
+      return response.content || 'Sem resposta.';
+    });
+
+    await this.telegramBot.start();
   }
 
   private showUsage() {

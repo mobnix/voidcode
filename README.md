@@ -1,64 +1,26 @@
 # VOIDCODE — Multi-LLM Agentic CLI v2.0
 
-> "Wake up... the terminal is your weapon."
+> *"Free your mind... the terminal is your weapon."*
+>
+> Created by **Mobnix**
 
-**VOIDCODE** é uma CLI agêntica para engenheiros de software. Suporta múltiplos providers de LLM (DeepSeek, OpenAI, Qwen, MiniMax), executa tarefas complexas com planejamento automático, e pode ser controlada remotamente via Telegram.
+**VOIDCODE** é uma CLI agêntica multi-provider para engenheiros de software. Conecta com **DeepSeek**, **OpenAI** (GPT-4o, Codex), **Qwen**, **MiniMax** ou qualquer API OpenAI-compatible. Planeja tarefas complexas antes de executar, roda agentes em paralelo, controla remotamente via **Telegram**, e mantém contexto entre sessões.
 
 ---
 
-## Features
+## Destaques
 
-### Core
-- **Multi-Provider** — DeepSeek, OpenAI (Codex/GPT-4o), Qwen, MiniMax, ou qualquer API OpenAI-compatible
-- **Agentic Loop** — a IA age: lê, escreve, busca, executa comandos, cria projetos
-- **Tool Calls Paralelas** — executa múltiplas tools simultaneamente (`Promise.all`)
-- **Plan-then-Execute** — detecta tarefas complexas e planeja antes de executar
-- **Auto-correção** — quando tools falham, injeta feedback automático para o LLM corrigir
-- **Modo Insano (`--insane`)** — executa tudo sem pedir confirmação
-
-### Tools (17 ferramentas nativas)
-| Tool | Descrição |
-|------|-----------|
-| `list_directory` | Lista arquivos e pastas |
-| `read_file` | Lê arquivo (com proteção de path e size) |
-| `read_file_lines` | Lê range de linhas (eficiente) |
-| `write_file` | Cria/sobrescreve arquivo |
-| `replace_file_content` | Substitui string em arquivo |
-| `patch_file` | Edita por número de linha |
-| `grep_search` | Busca regex (ripgrep) |
-| `glob_files` | Busca por padrão glob |
-| `run_shell_command` | Executa comando (com `background:true` para servidores) |
-| `spawn_sub_agent` | Cria sub-agente paralelo |
-| `memory_read` | Lê memória persistente |
-| `memory_write` | Salva memória (categorias: user/project/feedback) |
-| `git_status` | Status do repo |
-| `git_diff` | Diff staged/unstaged |
-| `git_log` | Histórico de commits |
-| `git_commit` | Stage + commit |
-| `web_fetch` | HTTP GET com extração de texto |
-
-### Inteligência
-- **Context Injection** — auto-detecta stack (Node/Python/Rust/Go/Docker), git branch, arquivos
-- **VOIDCODE.md** — coloque na raiz de qualquer projeto para instruir o agente (como CLAUDE.md)
-- **Memória Persistente** — categorizada (user/project/feedback), carregada automaticamente
-- **Sessões** — salva as 3 últimas, oferece retomada ao iniciar
-- **CWD Snapshot** — injeta `ls` + `git status` antes de cada tarefa (zero tokens extras)
-- **Smart Tool Selection** — envia só tools relevantes ao contexto (-500 tokens/request)
-- **Tool Cache** — resultados de leitura cacheados por 10s
-
-### Telegram Bot
-- Controle remoto do VoidCode pelo celular
-- Processa comandos como se fosse o terminal
-- Long polling, executa tools, retorna resultado
-- Setup: `/telegram` ou `/menu > 2`
-
-### Segurança
-- Shell injection prevention (`shellEscape`)
-- Path traversal protection (bloqueia `/proc`, `/dev`, `/sys`)
-- File size limits (max 10MB)
-- `.env` com permissões 0o600
-- Input validation nos git tools
-- 0 vulnerabilidades em dependências (`npm audit`)
+- **5 Providers** — DeepSeek, OpenAI, Qwen, MiniMax, Custom. Troque a qualquer momento com `/auth`
+- **17 Tools nativas** — filesystem, git, shell, web, memória, sub-agentes
+- **Plan-then-Execute** — detecta tarefas complexas, planeja e confirma antes de executar
+- **Auto-correção** — quando tools falham, injeta feedback para o LLM corrigir sozinho
+- **Agentes paralelos** — terminal non-blocking, novas tarefas vão para agentes em background
+- **Telegram Bot** — controle remoto pelo celular via @BotFather
+- **Memória persistente** — categorizada (user/project/feedback), carregada automaticamente
+- **Sessões** — salva as 3 últimas, resume ao iniciar
+- **Histórico de input** — seta cima/baixo navega inputs anteriores, persiste entre sessões
+- **VOIDCODE.md** — instruções por projeto (como CLAUDE.md)
+- **Modo Insano** (`--insane`) — executa tudo sem pedir permissão
 
 ---
 
@@ -73,64 +35,161 @@ npm run build
 npm install -g .
 ```
 
-Na primeira execução, o wizard configura o provider e API key:
+Primeira execução abre o wizard de setup:
+
 ```bash
 voidcode --insane
 ```
 
-Config fica em `~/.voidcode/.env` — funciona de qualquer diretório.
-
----
-
-## Comandos
-
-### Terminal
 ```
-/menu               Wizard central (auth, telegram, skills, memória, config)
-/auth               Trocar provider / modelo / API key
-/telegram           Configurar bot Telegram
-/usage              Token usage da sessão
-/plan               Toggle plan mode (planeja sem executar)
-/task <texto>       Adicionar tarefa
-/task done <id>     Marcar concluída
-/task rm <id>       Remover
-/commit <msg>       Git commit rápido
-/diff [file]        Git diff
-/log [n]            Git log
-/status             Git status
-/agent <prompt>     Agente em background
-/agents             Listar agentes ativos
-/btw <pergunta>     Pergunta rápida
-/createskill        Criar nova skill
-/memory             Ver memória persistente
-/skills             Listar tools e skills
-/compact            Compactar contexto
-/exit               Sair (salva sessão)
-Ctrl+C              Interromper tarefa
-Ctrl+D 2x           Sair imediato
+╔═══════════════════════════════════════╗
+║ SETUP INICIAL                        ║
+╠═══════════════════════════════════════╣
+║ STEP 1/3 — Provider & API Key       ║
+║ STEP 2/3 — Modelo                   ║
+║ STEP 3/3 — Telegram Bot (opcional)  ║
+╚═══════════════════════════════════════╝
 ```
 
-### Telegram
-```
-/start              Confirma conexão
-/status             Mostra cwd
-/stop               Desconecta bot
-<qualquer texto>    Executa como comando no VoidCode
-```
+Config salva em `~/.voidcode/.env` — funciona de qualquer diretório.
 
 ---
 
 ## Providers Suportados
 
-| Provider | Modelos | Base URL |
-|----------|---------|----------|
-| DeepSeek | deepseek-chat, deepseek-reasoner | api.deepseek.com/v1 |
-| OpenAI | gpt-4o, gpt-4o-mini, o3-mini | api.openai.com/v1 |
-| Qwen | qwen-plus, qwen-max, qwen-turbo | dashscope.aliyuncs.com/compatible-mode/v1 |
-| MiniMax | MiniMax-Text-01 | api.minimax.chat/v1 |
-| Custom | qualquer modelo | qualquer URL OpenAI-compatible |
+| Provider | Modelos | Observação |
+|----------|---------|------------|
+| **DeepSeek** | deepseek-chat, deepseek-reasoner | Bom custo-benefício, tool use sólido |
+| **OpenAI** | gpt-4o, gpt-4o-mini, o3-mini (Codex) | Multimodal, raciocínio avançado |
+| **Qwen** | qwen-plus, qwen-max, qwen-turbo | Alibaba Cloud |
+| **MiniMax** | MiniMax-Text-01 | Modelo chinês alternativo |
+| **Custom** | qualquer modelo | Qualquer endpoint OpenAI-compatible |
 
-Troque a qualquer momento com `/auth` ou `/menu > 1`.
+Troque em tempo real com `/auth` ou `/menu`.
+
+---
+
+## Telegram Bot
+
+Controle o VoidCode remotamente do celular:
+
+1. Crie um bot no **@BotFather** no Telegram
+2. Execute `/telegram` no VoidCode e cole o token
+3. Envie mensagens do celular — o VoidCode executa e responde
+
+```
+📱 Telegram                          💻 Terminal
+─────────────                        ──────────────
+"crie um server express porta 3000"  → processa como input
+                                     ← "✔ Server rodando em background"
+"/status"                            ← "📂 cwd: ~/meuapp"
+"/stop"                              ← bot desconecta
+```
+
+---
+
+## Tools (17 nativas)
+
+| Tool | Descrição |
+|------|-----------|
+| `list_directory` | Lista arquivos e pastas |
+| `read_file` | Lê arquivo (proteção de path + size 10MB) |
+| `read_file_lines` | Lê range de linhas (eficiente para arquivos grandes) |
+| `write_file` | Cria/sobrescreve arquivo |
+| `replace_file_content` | Substitui string em arquivo |
+| `patch_file` | Edita por número de linha (cirúrgico) |
+| `grep_search` | Busca regex com ripgrep |
+| `glob_files` | Busca por padrão glob |
+| `run_shell_command` | Executa comando (suporta `background:true` para servidores) |
+| `spawn_sub_agent` | Cria sub-agente paralelo |
+| `memory_read` | Lê memória persistente |
+| `memory_write` | Salva memória (categorias: user/project/feedback) |
+| `git_status` | Status do repositório |
+| `git_diff` | Diff staged/unstaged |
+| `git_log` | Histórico de commits |
+| `git_commit` | Stage + commit |
+| `web_fetch` | HTTP GET com extração de texto de HTML |
+
+---
+
+## Comandos
+
+### Geral
+| Comando | Descrição |
+|---------|-----------|
+| `/menu` | Wizard central (auth, telegram, skills, memória, sessões, config) |
+| `/auth` | Trocar provider / modelo / API key |
+| `/telegram` | Configurar bot Telegram |
+| `/usage` | Token usage da sessão |
+| `/plan` | Toggle plan mode (planeja sem executar) |
+| `/compact` | Compactar contexto manualmente |
+| `/exit` | Sair (salva sessão) |
+| `Ctrl+C` | Interromper tarefa atual |
+| `Ctrl+D 2x` | Sair imediato |
+
+### Tasks
+| Comando | Descrição |
+|---------|-----------|
+| `/task <texto>` | Adicionar tarefa |
+| `/task done <id>` | Marcar concluída |
+| `/task rm <id>` | Remover |
+
+### Git
+| Comando | Descrição |
+|---------|-----------|
+| `/commit <msg>` | Git commit rápido |
+| `/diff [file]` | Git diff |
+| `/log [n]` | Git log |
+| `/status` | Git status |
+
+### Agentes
+| Comando | Descrição |
+|---------|-----------|
+| `/agent <prompt>` | Spawna agente em background |
+| `/agents` | Lista agentes ativos |
+| `/queue` | Mostra fila de tarefas e agentes |
+| `/btw <pergunta>` | Pergunta rápida sem interromper |
+
+### Skills
+| Comando | Descrição |
+|---------|-----------|
+| `/createskill` | Cria nova skill (interativo) |
+| `/skills` | Lista tools e skills |
+| `/memory` | Ver memória persistente |
+
+---
+
+## Inteligência
+
+### Non-blocking Terminal
+O terminal fica **livre durante a execução**. Se digitar algo enquanto uma tarefa roda, a nova tarefa vai automaticamente para um **agente paralelo**. O prompt mostra `[busy]` quando ocupado.
+
+### Plan-then-Execute
+Tarefas complexas (criar projetos, refatorar, migrar) são **detectadas automaticamente**. O VoidCode planeja primeiro, mostra o plano, e pede confirmação antes de executar.
+
+### Auto-correção
+Quando 2+ tool calls consecutivas falham, o sistema injeta uma instrução de correção automática para o LLM analisar os erros e tentar de forma diferente.
+
+### Context Injection
+Antes de cada tarefa, injeta automaticamente: lista de arquivos do cwd + git branch + status. O LLM já sabe onde está sem gastar uma tool call.
+
+### Smart Tool Selection
+Analisa a mensagem do usuário e envia só as tools relevantes (economia de ~500 tokens/request).
+
+### Histórico de Input
+Seta ↑/↓ navega inputs anteriores. Persiste entre sessões em `~/.voidcode/history`. Suporta `Ctrl+R` para busca reversa.
+
+---
+
+## Segurança
+
+- Shell injection prevention (`shellEscape` em grep e git)
+- Path traversal protection (bloqueia `/proc`, `/dev`, `/sys`)
+- File size limits (max 10MB para leitura)
+- `.env` com permissões 0o600 (só owner)
+- Histórico com permissões 0o600
+- Input validation nos git tools
+- 0 vulnerabilidades em dependências (`npm audit`)
 
 ---
 
@@ -138,24 +197,34 @@ Troque a qualquer momento com `/auth` ou `/menu > 1`.
 
 ```
 voidcode/
-├── VOIDCODE.md              # Instruções do projeto (lido auto pelo CLI)
+├── VOIDCODE.md                 # Instruções do projeto (auto-carregado)
+├── README.md
 ├── voidcode-cli/
 │   ├── src/
-│   │   ├── cli/chat.ts      # Loop principal, comandos, plan-execute
-│   │   ├── cli/wizard.ts    # Setup wizard
-│   │   ├── core/deepseek.ts # LLM service (multi-provider)
-│   │   ├── core/providers.ts # Definição dos providers
-│   │   ├── core/context.ts  # Auto-detect projeto, memória estruturada
-│   │   ├── core/telegram.ts # Telegram bot bridge
-│   │   ├── tools/index.ts   # 17 tools + handlers
-│   │   ├── skills/          # Skills dinâmicas
-│   │   └── utils/           # UI, JSON parser, keyboard
-│   └── src/__tests__/       # 26 testes unitários
-└── ~/.voidcode/             # Config global
-    ├── .env                 # API keys (perm 600)
-    ├── memory/              # Memória persistente
-    ├── skills/              # Skills customizadas
-    └── sessions.json        # Últimas 3 sessões
+│   │   ├── cli/
+│   │   │   ├── chat.ts         # Loop principal, non-blocking, plan-execute
+│   │   │   └── wizard.ts       # Setup wizard (provider + telegram)
+│   │   ├── core/
+│   │   │   ├── deepseek.ts     # LLM service multi-provider
+│   │   │   ├── providers.ts    # Definição dos 5 providers
+│   │   │   ├── context.ts      # Auto-detect projeto, memória estruturada
+│   │   │   └── telegram.ts     # Telegram bot bridge
+│   │   ├── tools/
+│   │   │   └── index.ts        # 17 tools + handlers + security
+│   │   ├── skills/             # Skills dinâmicas (~/.voidcode/skills/)
+│   │   ├── utils/
+│   │   │   ├── ui.ts           # ASCII art, progress bar, footer, splash
+│   │   │   ├── json.ts         # Safe JSON parser (repara JSON quebrado)
+│   │   │   └── keyboard.ts     # Keyboard manager
+│   │   └── __tests__/          # 26 testes unitários
+│   ├── package.json
+│   └── tsconfig.json
+└── ~/.voidcode/                # Config global (criado automaticamente)
+    ├── .env                    # API keys (perm 600)
+    ├── history                 # Histórico de input (perm 600)
+    ├── memory/                 # Memória persistente categorizada
+    ├── skills/                 # Skills customizadas (.js)
+    └── sessions.json           # Últimas 3 sessões
 ```
 
 ---
@@ -170,4 +239,12 @@ npm test
 
 ---
 
-**v2.0** — Multi-LLM, Telegram, Plan-Execute, Auto-Correction, Security Hardening
+## Licença
+
+MIT
+
+---
+
+**v2.0** — Multi-LLM · Telegram · Plan-Execute · Non-blocking · Auto-Correction · Security Hardening
+
+Created by **Mobnix**

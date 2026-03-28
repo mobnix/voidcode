@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { DeepSeekService, saveConfig } from '../core/deepseek.js';
 import { PROVIDERS } from '../core/providers.js';
-import { logger, smartOutput, truncateToolOutput, renderFooter } from '../utils/ui.js';
+import { logger, smartOutput, truncateToolOutput, renderFooter, initFixedFooter, destroyFixedFooter, toolProgress } from '../utils/ui.js';
 import { tools, toolHandlers, getToolSubset } from '../tools/index.js';
 import { loadSkills } from '../skills/index.js';
 import { safeJSONParse } from '../utils/json.js';
@@ -13,14 +13,46 @@ import { detectProjectContext, loadStructuredMemory } from '../core/context.js';
 import { execSync } from 'node:child_process';
 import { TelegramBridge } from '../core/telegram.js';
 
-// --- Readline persistente ---
+// --- Readline com histórico persistente ---
 let rl: readline.Interface | null = null;
 let ctrlDCount = 0;
 let ctrlDTimer: ReturnType<typeof setTimeout> | null = null;
 
+const HISTORY_FILE = path.join(
+  process.env.HOME || process.env.USERPROFILE || '~',
+  '.voidcode', 'history'
+);
+const MAX_HISTORY = 200;
+
+// Carrega histórico de sessões anteriores
+function loadHistory(): string[] {
+  try {
+    if (fs.existsSync(HISTORY_FILE)) {
+      return fs.readFileSync(HISTORY_FILE, 'utf-8').split('\n').filter(Boolean).slice(-MAX_HISTORY);
+    }
+  } catch { /* ok */ }
+  return [];
+}
+
+function saveHistory(lines: string[]) {
+  try {
+    const dir = path.dirname(HISTORY_FILE);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(HISTORY_FILE, lines.slice(-MAX_HISTORY).join('\n'), { mode: 0o600 });
+  } catch { /* ok */ }
+}
+
 function getRL(): readline.Interface {
   if (!rl) {
-    rl = readline.createInterface({ input: process.stdin, output: process.stdout, terminal: true });
+    rl = readline.createInterface({
+      input: process.stdin,
+      output: process.stdout,
+      terminal: true,
+      history: loadHistory(),
+      historySize: MAX_HISTORY,
+      removeHistoryDuplicates: true,
+      tabSize: 2
+    } as any); // history option exists in Node 18+ but not in types
     rl.on('SIGINT', () => {
       console.log(chalk.hex('#008F11')('\n  (Ctrl+C) Use /exit para sair.'));
       rl?.prompt();
@@ -28,11 +60,18 @@ function getRL(): readline.Interface {
     rl.on('close', () => {
       ctrlDCount++;
       if (ctrlDTimer) clearTimeout(ctrlDTimer);
-      if (ctrlDCount >= 2) { console.log(chalk.hex('#008F11')('\nGoodbye.')); process.exit(0); }
+      if (ctrlDCount >= 2) { destroyFixedFooter(); console.log(chalk.hex('#008F11')('\nGoodbye.')); process.exit(0); }
       console.log(chalk.hex('#008F11')('\n  (Ctrl+D) Pressione novamente para sair.'));
       rl = null;
       ctrlDTimer = setTimeout(() => { ctrlDCount = 0; }, 2000);
       getRL();
+    });
+    // Salva histórico quando adiciona linha
+    rl.on('line', () => {
+      try {
+        const history = (rl as any).history || [];
+        saveHistory([...history].reverse());
+      } catch { /* ok */ }
     });
   }
   return rl;
@@ -155,6 +194,8 @@ export class ChatLoop {
   private toolCache = new ToolCache();
   private consecutiveErrors = 0;
   private telegramBot: TelegramBridge | null = null;
+  private processing = false; // true quando está processando uma tarefa
+  private taskQueue: string[] = []; // fila de inputs pendentes
   private spinner = ora({ text: 'Processando...', color: 'green', spinner: 'dots' });
 
   constructor(insaneMode = false) {
@@ -212,13 +253,15 @@ export class ChatLoop {
       }
     }
 
+    initFixedFooter();
     this.showFooter();
 
     while (true) {
       if (this.messages.length > this.MAX_HISTORY_LENGTH) await this.compactHistory();
 
       const mode = this.planMode ? chalk.hex('#ADFF2F')('[PLAN] ') : '';
-      const userInput = await ask(mode + chalk.hex('#00FF41')('Mob > '));
+      const busy = this.processing ? chalk.hex('#008F11')('[busy] ') : '';
+      const userInput = await ask(busy + mode + chalk.hex('#00FF41')('Mob > '));
 
       if (!userInput) continue;
       if (userInput.toLowerCase() === '/exit' || userInput.toLowerCase() === 'exit') {
@@ -226,21 +269,47 @@ export class ChatLoop {
       }
       if (userInput.startsWith('/')) { await this.handleCommand(userInput); continue; }
 
-      // --- INTELIGÊNCIA: detecta complexidade e age diferente ---
-      if (isComplexTask(userInput) && !this.planMode) {
-        await this.handleComplexTask(userInput);
-      } else {
-        // Injeta snapshot do cwd como contexto
-        const snapshot = getCwdSnapshot();
-        if (snapshot) {
-          this.messages.push({ role: 'system', content: `[CWD]: ${snapshot}` });
-        }
-        this.messages.push({ role: 'user', content: userInput });
-        this.toolCache.invalidate();
-        await this.processResponse();
+      // Se já está processando, spawna como agente paralelo
+      if (this.processing) {
+        const preview = userInput.length > 60 ? userInput.substring(0, 60) + '...' : userInput;
+        logger.info(`Ocupado. Enviando para agente: "${preview}"`);
+        this.spawnBackgroundAgent(userInput);
+        continue;
       }
-      this.showFooter();
+
+      // Executa task - non-blocking: roda em background e volta pro prompt
+      this.processing = true;
+      this.executeTaskBackground(userInput);
     }
+  }
+
+  private executeTaskBackground(userInput: string) {
+    const run = async () => {
+      try {
+        if (isComplexTask(userInput) && !this.planMode) {
+          await this.handleComplexTask(userInput);
+        } else {
+          const snapshot = getCwdSnapshot();
+          if (snapshot) this.messages.push({ role: 'system', content: `[CWD]: ${snapshot}` });
+          this.messages.push({ role: 'user', content: userInput });
+          this.toolCache.invalidate();
+          await this.processResponse();
+        }
+      } catch (e: any) {
+        logger.error(`[ERRO] ${e.message}`);
+      } finally {
+        this.processing = false;
+        this.showFooter();
+        // Processa fila
+        if (this.taskQueue.length > 0) {
+          const next = this.taskQueue.shift()!;
+          logger.info(`Fila: processando "${next.substring(0, 60)}..."`);
+          this.processing = true;
+          this.executeTaskBackground(next);
+        }
+      }
+    };
+    run();
   }
 
   // --- TAREFAS COMPLEXAS: plan-then-execute ---
@@ -359,6 +428,19 @@ export class ChatLoop {
         break;
       }
       case 'agents': this.showAgents(); break;
+      case 'queue': {
+        if (!this.taskQueue.length && !this.processing && !this.activeAgents.size) {
+          logger.info('Sem tarefas em andamento.');
+        } else {
+          if (this.processing) logger.info('Tarefa principal: em execução');
+          if (this.taskQueue.length) {
+            console.log(chalk.hex('#00FF41')(`  Fila: ${this.taskQueue.length} pendente(s)`));
+            this.taskQueue.forEach((t, i) => console.log(chalk.hex('#005500')(`    ${i + 1}) ${t.substring(0, 80)}`)));
+          }
+          this.showAgents();
+        }
+        break;
+      }
       case 'btw': {
         const q = args.join(' ');
         if (!q) { logger.error('/btw <pergunta>'); break; }
@@ -384,7 +466,8 @@ export class ChatLoop {
   ${chalk.hex('#ADFF2F')('/usage')}  tokens    ${chalk.hex('#ADFF2F')('/plan')}  toggle     ${chalk.hex('#ADFF2F')('/compact')}  contexto
   ${chalk.hex('#ADFF2F')('/task <t>')}  add    ${chalk.hex('#ADFF2F')('/task done <id>')}     ${chalk.hex('#ADFF2F')('/task rm <id>')}
   ${chalk.hex('#ADFF2F')('/commit <m>')}       ${chalk.hex('#ADFF2F')('/diff')}            ${chalk.hex('#ADFF2F')('/log')}  ${chalk.hex('#ADFF2F')('/status')}
-  ${chalk.hex('#ADFF2F')('/agent <p>')}  bg    ${chalk.hex('#ADFF2F')('/agents')}           ${chalk.hex('#ADFF2F')('/btw <q>')}  quick
+  ${chalk.hex('#ADFF2F')('/agent <p>')}  bg    ${chalk.hex('#ADFF2F')('/agents')}           ${chalk.hex('#ADFF2F')('/queue')}  fila
+  ${chalk.hex('#ADFF2F')('/btw <q>')}  quick
   ${chalk.hex('#ADFF2F')('/createskill')}      ${chalk.hex('#ADFF2F')('/memory')}           ${chalk.hex('#ADFF2F')('/skills')}
   ${chalk.hex('#ADFF2F')('/exit')}  sair       ${chalk.hex('#ADFF2F')('Ctrl+C')}  cancela   ${chalk.hex('#ADFF2F')('Ctrl+D 2x')}  quit
 `)); break;
@@ -646,8 +729,8 @@ export class ChatLoop {
         logger.dim('  Sessão salva.');
       }
     } catch { /* ok */ }
+    destroyFixedFooter();
     logger.matrix('Goodbye, Mr. Anderson...');
-    this.showFooter();
     process.exit(0);
   }
 
@@ -754,7 +837,7 @@ export class ChatLoop {
           }));
 
           const elapsed = Date.now() - startTime;
-          logger.success(`${toolCalls.length} tools em ${elapsed}ms`);
+          toolProgress(toolCalls.length, toolCalls.length, `${elapsed}ms`);
           this.messages.push(...results);
 
           // Se muitos erros seguidos, injeta dica de correção

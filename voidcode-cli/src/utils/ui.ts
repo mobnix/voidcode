@@ -64,13 +64,12 @@ export function smartOutput(text: string, label: string = 'VOIDCODE'): void {
   console.log(tail.join('\n') + '\n');
 }
 
-const MAX_TOOL_OUTPUT = 5000; // 5k chars max por tool result
+const MAX_TOOL_OUTPUT = 3000; // 3k chars max por tool result (~750 tokens)
 
 export function truncateToolOutput(output: string): string {
   if (output.length <= MAX_TOOL_OUTPUT) return output;
-  // Mantém início e final (erros geralmente ficam no final)
-  const head = 2500;
-  const tail = 2000;
+  const head = 1500;
+  const tail = 1000;
   return output.substring(0, head) +
     `\n... [${output.length - head - tail} chars ocultos] ...\n` +
     output.substring(output.length - tail);

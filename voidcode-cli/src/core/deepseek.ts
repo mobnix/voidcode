@@ -112,7 +112,7 @@ export class DeepSeekService {
   }
 
   private async _chatWithRetry(messages: any[], tools: any[] | undefined, attempt: number): Promise<any> {
-    const TIMEOUT = 180_000; // 3 minutos
+    const TIMEOUT = 60_000; // 60s - se não respondeu, retry com menos contexto
     this._abortController = new AbortController();
 
     try {
@@ -153,8 +153,8 @@ export class DeepSeekService {
         const reducedTools = attempt === 0 ? tools : undefined;
         return this._chatWithRetry(reduced, reducedTools, attempt + 1);
       }
-      // Timeout: retry 1 vez com contexto reduzido
-      if (msg.includes('Timeout') && attempt < 1) {
+      // Timeout: retry até 2x com contexto reduzido
+      if (msg.includes('Timeout') && attempt < 2) {
         const reduced = this.reduceMessages(messages);
         return this._chatWithRetry(reduced, tools, attempt + 1);
       }

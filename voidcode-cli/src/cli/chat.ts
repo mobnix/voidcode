@@ -181,7 +181,7 @@ export class ChatLoop {
   private abortTask = false;
   private allTools: any[] = [];
   private allHandlers: Record<string, (args: any) => any> = {};
-  private readonly MAX_HISTORY_LENGTH = 15;
+  private readonly MAX_HISTORY_LENGTH = 10;
   private activeAgents: Map<string, { promise: Promise<string>; objective: string; startedAt: Date; status: string; iteration: number }> = new Map();
   private agentCounter = 0;
   private tasks: Task[] = [];
@@ -243,9 +243,10 @@ cwd: ${process.cwd()}`;
       const mode = this.planMode ? chalk.hex('#ADFF2F')('[PLAN] ') : '';
       const busy = this.processing ? chalk.hex('#008F11')('[busy] ') : '';
       const cols = process.stdout.columns || 80;
-      console.log(chalk.hex('#003B00')('─'.repeat(cols)));
+      const line = chalk.hex('#003B00')('─'.repeat(cols));
+      console.log(line);
       const userInput = await ask(busy + mode + chalk.hex('#00FF41')('Mob > '));
-      console.log(chalk.hex('#003B00')('─'.repeat(cols)));
+      console.log(line);
 
       if (!userInput) continue;
       if (userInput.toLowerCase() === '/exit' || userInput.toLowerCase() === 'exit') {
@@ -278,9 +279,10 @@ cwd: ${process.cwd()}`;
           await this.processResponse();
         }
       } catch (e: any) {
-        logger.error(`[ERRO] ${e.message}`);
+        logger.error(`Erro: ${e.message}`);
       } finally {
         this.processing = false;
+        logger.dim('  pronto');
         this.showFooter();
         // Processa fila
         if (this.taskQueue.length > 0) {
@@ -824,17 +826,29 @@ cwd: ${process.cwd()}`;
     console.log(chalk.hex('#003B00')('─'.repeat(cols)));
   }
 
-  // --- Live timer: mostra progresso enquanto aguarda API ---
+  // --- Live timer com watchdog ---
   private startLiveTimer(label: string): () => void {
     const start = Date.now();
+    let stopped = false;
     const interval = setInterval(() => {
-      const sec = ((Date.now() - start) / 1000).toFixed(0);
+      if (stopped) return;
+      const sec = Math.round((Date.now() - start) / 1000);
       const tokens = this.service.sessionUsage.totalTokens;
       process.stdout.write(`\r${chalk.hex('#005500')(`  ${label} ${sec}s | ${tokens > 1000 ? (tokens/1000).toFixed(1)+'k' : tokens} tokens`)}`);
+      // Watchdog: se passou de 70s, aborta (o timeout da API é 60s, dá margem)
+      if (sec > 70 && !this.abortTask) {
+        stopped = true;
+        clearInterval(interval);
+        process.stdout.write('\r\x1b[2K');
+        logger.warn('Watchdog: timeout, forçando abort');
+        this.service.abort();
+        this.abortTask = true;
+      }
     }, 1000);
     return () => {
+      stopped = true;
       clearInterval(interval);
-      process.stdout.write('\r\x1b[2K'); // limpa a linha do timer
+      process.stdout.write('\r\x1b[2K');
     };
   }
 
@@ -888,34 +902,42 @@ cwd: ${process.cwd()}`;
         this.messages.push(response);
 
         if (response.content) smartOutput(response.content, 'VOIDCODE');
-        if (!response.tool_calls?.length) break;
+        if (!response.tool_calls?.length) {
+          if (!response.content) logger.dim('  (sem resposta)');
+          break;
+        }
 
         const toolCalls = response.tool_calls;
 
         if (this.insaneMode) {
           const startTime = Date.now();
           const results = await Promise.all(toolCalls.map(async (tc: any) => {
-            const name = tc.function.name;
-            const toolArgs = safeJSONParse(tc.function.arguments);
-            logger.tool(name, JSON.stringify(toolArgs));
+            try {
+              const name = tc.function.name;
+              const toolArgs = safeJSONParse(tc.function.arguments);
+              logger.tool(name, JSON.stringify(toolArgs));
 
-            const cacheKey = this.toolCache.key(name, toolArgs);
-            const cached = this.toolCache.get(cacheKey);
-            if (cached) return { role: 'tool' as const, tool_call_id: tc.id, content: cached };
+              const cacheKey = this.toolCache.key(name, toolArgs);
+              const cached = this.toolCache.get(cacheKey);
+              if (cached) return { role: 'tool' as const, tool_call_id: tc.id, content: cached };
 
-            const handler = this.allHandlers[name];
-            let result = handler ? await handler(toolArgs) : 'Tool não encontrada.';
-            result = truncateToolOutput(String(result));
-            this.toolCache.set(cacheKey, result);
-            if (['write_file', 'replace_file_content', 'git_commit', 'run_shell_command', 'patch_file'].includes(name)) this.toolCache.invalidate();
+              const handler = this.allHandlers[name];
+              let result = handler ? await handler(toolArgs) : 'Tool não encontrada.';
+              result = truncateToolOutput(String(result));
+              this.toolCache.set(cacheKey, result);
+              if (['write_file', 'replace_file_content', 'git_commit', 'run_shell_command', 'patch_file'].includes(name)) this.toolCache.invalidate();
 
-            if (result.startsWith('Erro:') || result.includes('MODULE_NOT_FOUND') || result.includes('ENOENT') || result.includes('command not found')) {
-              this.consecutiveErrors++;
-            } else {
-              this.consecutiveErrors = 0;
+              if (result.startsWith('Erro:') || result.includes('MODULE_NOT_FOUND') || result.includes('ENOENT') || result.includes('command not found')) {
+                this.consecutiveErrors++;
+              } else {
+                this.consecutiveErrors = 0;
+              }
+
+              return { role: 'tool' as const, tool_call_id: tc.id, content: result };
+            } catch (toolErr: any) {
+              logger.error(`tool ${tc.function?.name} crash: ${toolErr.message}`);
+              return { role: 'tool' as const, tool_call_id: tc.id, content: `Erro: ${toolErr.message}` };
             }
-
-            return { role: 'tool' as const, tool_call_id: tc.id, content: result };
           }));
 
           logger.dim(`  ${toolCalls.length} tools ${Date.now() - startTime}ms`);
@@ -948,36 +970,54 @@ cwd: ${process.cwd()}`;
       if (!this.abortTask) logger.error(`Erro: ${error.message}`);
     } finally {
       process.removeListener('SIGINT', sigintHandler);
+      if (this.abortTask) {
+        logger.dim('  tarefa cancelada');
+      }
       this.abortTask = false;
     }
   }
 
-  // Comprime mensagens antigas pra não explodir tokens
-  // Mantém últimas 6 mensagens intactas, trunca content das anteriores
+  // Estima tokens de uma mensagem (~4 chars por token)
+  private estimateTokens(msg: any): number {
+    let chars = 0;
+    if (msg.content) chars += msg.content.length;
+    if (msg.tool_calls) chars += JSON.stringify(msg.tool_calls).length;
+    return Math.ceil(chars / 4);
+  }
+
+  // Token budget: garante que o total de messages não passe do limite
+  // Estratégia: comprime do mais antigo pro mais recente até caber
   private compressOldMessages() {
-    const KEEP_RECENT = 6; // últimas 6 msgs com conteúdo completo
-    const MAX_OLD_CONTENT = 200; // chars max pra mensagens antigas
+    const TOKEN_BUDGET = 8000; // max ~8k tokens de mensagens (tools usam ~1.2k separado)
+    const KEEP_RECENT = 4; // últimas 4 msgs intactas sempre
 
-    if (this.messages.length <= KEEP_RECENT + 2) return; // nada pra comprimir
+    // Calcula total atual
+    let total = this.messages.reduce((sum: number, m: any) => sum + this.estimateTokens(m), 0);
 
-    const cutoff = this.messages.length - KEEP_RECENT;
+    if (total <= TOKEN_BUDGET) return; // dentro do budget
 
-    for (let i = 1; i < cutoff; i++) { // pula system prompt (index 0)
+    const cutoff = Math.max(1, this.messages.length - KEEP_RECENT);
+
+    // Passo 1: trunca tool results antigos pra 100 chars
+    for (let i = 1; i < cutoff && total > TOKEN_BUDGET; i++) {
       const msg = this.messages[i];
-      if (!msg || !msg.content) continue;
-
-      // Já comprimido?
-      if (msg.content.length <= MAX_OLD_CONTENT) continue;
-
-      if (msg.role === 'tool') {
-        // Tool results antigos: só primeiras linhas
-        const firstLines = msg.content.split('\n').slice(0, 3).join('\n');
-        msg.content = firstLines.substring(0, MAX_OLD_CONTENT) + '...';
-      } else if (msg.role === 'assistant') {
-        // Respostas antigas: trunca
-        msg.content = msg.content.substring(0, MAX_OLD_CONTENT) + '...';
+      if (!msg?.content || msg.content.length <= 100) continue;
+      if (msg.role === 'tool' || msg.role === 'assistant') {
+        const before = this.estimateTokens(msg);
+        const firstLine = msg.content.split('\n')[0] || '';
+        msg.content = firstLine.substring(0, 100);
+        total -= (before - this.estimateTokens(msg));
       }
-      // user e system: mantém (são curtos)
+    }
+
+    // Passo 2: se ainda acima, remove mensagens antigas (mantém system + recentes)
+    while (total > TOKEN_BUDGET && this.messages.length > KEEP_RECENT + 1) {
+      const removed = this.messages.splice(1, 1)[0]; // remove a 2a msg (depois do system)
+      total -= this.estimateTokens(removed);
+    }
+
+    if (total > TOKEN_BUDGET) {
+      logger.dim(`  contexto: ~${Math.round(total/1000)}k tokens (budget: ${TOKEN_BUDGET/1000}k)`);
     }
   }
 

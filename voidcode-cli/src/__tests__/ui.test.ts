@@ -8,7 +8,7 @@ describe('truncateToolOutput', () => {
   });
 
   it('returns string at limit unchanged', () => {
-    const input = 'x'.repeat(5000);
+    const input = 'x'.repeat(3000);
     expect(truncateToolOutput(input)).toBe(input);
   });
 

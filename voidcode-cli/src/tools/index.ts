@@ -88,7 +88,7 @@ function ensureMemoryDir() {
   }
 }
 
-function shell(cmd: string, timeout = 30000): string {
+function shell(cmd: string, timeout = 15000): string {
   try {
     let output = execSync(cmd, { encoding: 'utf-8', timeout, maxBuffer: 1024 * 1024 * 5 });
     // Limita output de shell pra não estourar contexto
@@ -155,12 +155,11 @@ export const toolHandlers: Record<string, (args: any) => any> = {
       const content = fs.readFileSync(resolved, 'utf-8');
       // Retorna com linhas numeradas para facilitar patch_file
       const lines = content.split('\n');
-      if (lines.length > 150) {
-        // Arquivo grande: retorna só início e final, sugere read_file_lines
-        return `[${lines.length} linhas. Use read_file_lines para range específico]\n` +
-          lines.slice(0, 50).map((l, i) => `${i + 1}: ${l}`).join('\n') +
-          `\n... [${lines.length - 80} linhas ocultas] ...\n` +
-          lines.slice(-30).map((l, i) => `${lines.length - 30 + i + 1}: ${l}`).join('\n');
+      if (lines.length > 100) {
+        return `[${lines.length} linhas. Use read_file_lines para ver parte específica]\n` +
+          lines.slice(0, 30).map((l, i) => `${i + 1}: ${l}`).join('\n') +
+          `\n... [${lines.length - 50} linhas ocultas] ...\n` +
+          lines.slice(-20).map((l, i) => `${lines.length - 20 + i + 1}: ${l}`).join('\n');
       }
       return lines.map((l, i) => `${i + 1}: ${l}`).join('\n');
     } catch (e: any) {

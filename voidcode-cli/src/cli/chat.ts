@@ -7,10 +7,10 @@ import { DeepSeekService, saveConfig } from '../core/deepseek.js';
 import { PROVIDERS } from '../core/providers.js';
 import { logger, smartOutput, truncateToolOutput, renderFooter } from '../utils/ui.js';
 import { tools, toolHandlers, getToolSubset } from '../tools/index.js';
-// getToolSubset: envia só tools relevantes ao contexto = menos tokens por request
 import { loadSkills } from '../skills/index.js';
 import { safeJSONParse } from '../utils/json.js';
 import { detectProjectContext, loadStructuredMemory } from '../core/context.js';
+import { execSync } from 'node:child_process';
 
 // --- Readline persistente ---
 let rl: readline.Interface | null = null;
@@ -43,13 +43,12 @@ function ask(promptText: string): Promise<string> {
   });
 }
 
-// --- Tool Result Cache (evita re-ler mesmo arquivo na mesma iteração) ---
+// --- Tool Result Cache ---
 class ToolCache {
   private cache = new Map<string, { result: string; ts: number }>();
-  private readonly TTL = 10000; // 10 segundos
+  private readonly TTL = 10000;
 
   key(name: string, args: any): string {
-    // Só cacheia leituras
     if (!['read_file', 'list_directory', 'git_status', 'git_log', 'glob_files'].includes(name)) return '';
     return `${name}:${JSON.stringify(args)}`;
   }
@@ -62,36 +61,24 @@ class ToolCache {
     return entry.result;
   }
 
-  set(k: string, result: string) {
-    if (!k) return;
-    this.cache.set(k, { result, ts: Date.now() });
-  }
-
-  invalidate() {
-    this.cache.clear();
-  }
+  set(k: string, result: string) { if (k) this.cache.set(k, { result, ts: Date.now() }); }
+  invalidate() { this.cache.clear(); }
 }
 
 interface Task { id: number; text: string; status: 'pending' | 'done'; }
 
-// --- Persistência de sessão (últimas 3) ---
+// --- Sessões ---
 const SESSION_DIR = path.join(process.env.HOME || process.env.USERPROFILE || '~', '.voidcode');
 const SESSIONS_FILE = path.join(SESSION_DIR, 'sessions.json');
-const MAX_SESSIONS = 3;
 
-interface SessionEntry {
-  summary: string;
-  cwd: string;
-  timestamp: string;
-}
+interface SessionEntry { summary: string; cwd: string; timestamp: string; }
 
 function saveSession(summary: string, cwd: string) {
   try {
     if (!fs.existsSync(SESSION_DIR)) fs.mkdirSync(SESSION_DIR, { recursive: true });
     const sessions = loadAllSessions();
     sessions.unshift({ summary, cwd, timestamp: new Date().toISOString() });
-    // Mantém só as últimas 3
-    fs.writeFileSync(SESSIONS_FILE, JSON.stringify(sessions.slice(0, MAX_SESSIONS), null, 2));
+    fs.writeFileSync(SESSIONS_FILE, JSON.stringify(sessions.slice(0, 3), null, 2));
   } catch { /* ok */ }
 }
 
@@ -103,8 +90,7 @@ function loadAllSessions(): SessionEntry[] {
 }
 
 function formatSessionForDisplay(s: SessionEntry, index: number): string {
-  const date = new Date(s.timestamp);
-  const ago = getTimeAgo(date);
+  const ago = getTimeAgo(new Date(s.timestamp));
   const cwdShort = s.cwd.replace(process.env.HOME || '', '~');
   return `  ${chalk.hex('#ADFF2F')(`${index + 1})`)} ${chalk.hex('#008F11')(ago)} ${chalk.hex('#005500')(`(${cwdShort})`)}\n     ${chalk.hex('#00FF41')(s.summary.substring(0, 120))}`;
 }
@@ -115,8 +101,41 @@ function getTimeAgo(date: Date): string {
   if (mins < 60) return `${mins}min atrás`;
   const hours = Math.round(mins / 60);
   if (hours < 24) return `${hours}h atrás`;
-  const days = Math.round(hours / 24);
-  return `${days}d atrás`;
+  return `${Math.round(hours / 24)}d atrás`;
+}
+
+// --- Pre-prompt: snapshot do cwd antes de cada tarefa ---
+function getCwdSnapshot(): string {
+  const parts: string[] = [];
+  try {
+    const files = fs.readdirSync('.', { withFileTypes: true });
+    const dirs = files.filter(f => f.isDirectory() && !f.name.startsWith('.')).map(f => f.name + '/');
+    const regular = files.filter(f => f.isFile()).map(f => f.name);
+    parts.push(`Arquivos: ${[...dirs, ...regular].slice(0, 30).join(', ')}${files.length > 30 ? '...' : ''}`);
+  } catch { /* ok */ }
+  try {
+    const status = execSync('git status --short 2>/dev/null', { encoding: 'utf-8', timeout: 3000 }).trim();
+    const branch = execSync('git branch --show-current 2>/dev/null', { encoding: 'utf-8', timeout: 3000 }).trim();
+    if (branch) parts.push(`Git: ${branch}${status ? `, ${status.split('\n').length} mudanças` : ', limpo'}`);
+  } catch { /* not git */ }
+  return parts.join(' | ');
+}
+
+// --- Detecta complexidade da tarefa ---
+function isComplexTask(input: string): boolean {
+  const complexPatterns = [
+    /cri(e|ar).*(projeto|app|aplicação|sistema|dashboard|api)/i,
+    /implement(e|ar)/i,
+    /refator(e|ar)/i,
+    /migr(e|ar)/i,
+    /configur(e|ar).*(completo|inteiro|todo)/i,
+    /\b(full|inteiro|completo|todo o|todos os)\b/i,
+    /\bdo zero\b/i,
+    /\bfrom scratch\b/i,
+    /múltiplo|vários arquivos|varias pastas/i,
+    /subir.*servidor|deploy|build.*prod/i,
+  ];
+  return complexPatterns.some(p => p.test(input));
 }
 
 export class ChatLoop {
@@ -133,34 +152,32 @@ export class ChatLoop {
   private tasks: Task[] = [];
   private taskCounter = 0;
   private toolCache = new ToolCache();
+  private consecutiveErrors = 0;
   private spinner = ora({ text: 'Processando...', color: 'green', spinner: 'dots' });
 
   constructor(insaneMode = false) {
     this.service = new DeepSeekService();
     this.insaneMode = insaneMode;
 
-    // System prompt otimizado para eficiência
     const systemPrompt = [
       `Você é VOIDCODE, engenheiro sênior full-stack.`,
-      `REGRAS DE EFICIÊNCIA:`,
-      `- CONCISO. Sem explicações óbvias. Código fala.`,
-      `- Chame MÚLTIPLAS tools em PARALELO (ex: ler 3 arquivos = 3 calls na mesma resposta).`,
-      `- Antes de rodar: instale deps (npm install, pip install).`,
-      `- Não releia arquivos que você acabou de escrever.`,
-      `- Tarefas complexas: faça tudo de uma vez, não passo a passo.`,
-      `- Use memory_write para salvar decisões importantes (category: user/project/feedback).`,
-      `- Se o usuário corrigir você, salve na memória como feedback.`,
-      this.insaneMode ? '- INSANE MODE: execute tools direto.' : '- Peça permissão antes de alterar arquivos.',
+      `REGRAS CRÍTICAS:`,
+      `1. CONCISO. Código fala, não explique o óbvio.`,
+      `2. Chame MÚLTIPLAS tools em PARALELO na mesma resposta (ex: ler 3 arquivos = 3 tool_calls).`,
+      `3. Antes de rodar projeto: instale deps primeiro (npm install, pip install).`,
+      `4. Para servidores: use background:true no run_shell_command.`,
+      `5. NÃO releia arquivos que você acabou de escrever.`,
+      `6. Se um erro ocorrer, analise o erro e tente corrigir automaticamente.`,
+      `7. Use memory_write para salvar decisões (category: user/project/feedback).`,
+      `8. Para edições cirúrgicas: use patch_file ou replace_file_content em vez de reescrever arquivo inteiro.`,
+      this.insaneMode ? '9. INSANE MODE: execute tudo direto.' : '9. Peça permissão antes de alterar.',
       `cwd: ${process.cwd()}`
     ].join('\n');
 
     this.messages.push({ role: 'system', content: systemPrompt });
 
-    // Injeta contexto do projeto automaticamente
     const projectCtx = detectProjectContext();
-    if (projectCtx) {
-      this.messages.push({ role: 'system', content: projectCtx });
-    }
+    if (projectCtx) this.messages.push({ role: 'system', content: projectCtx });
   }
 
   async start() {
@@ -168,29 +185,26 @@ export class ChatLoop {
     this.allTools = [...tools, ...skillTools];
     this.allHandlers = { ...toolHandlers, ...skillHandlers };
 
-    // Carrega memória estruturada
     try {
       const memory = loadStructuredMemory();
       if (memory) {
-        this.messages.push({ role: 'system', content: `[MEMÓRIA]:\n${memory}` });
+        this.messages.push({ role: 'system', content: `[MEM]:\n${memory}` });
         logger.info('Memória carregada.');
       }
     } catch { /* ok */ }
 
-    // Oferece resumo de sessões anteriores
     const sessions = loadAllSessions();
     if (sessions.length > 0) {
       console.log(chalk.hex('#00FF41')('\n  Sessões anteriores:'));
       sessions.forEach((s, i) => console.log(formatSessionForDisplay(s, i)));
-      console.log(`  ${chalk.hex('#008F11')('0)')} ${chalk.hex('#005500')('Nova sessão (ignorar)')}\n`);
-
-      const choice = await ask(chalk.hex('#008F11')('Retomar sessão? (0/1/2/3): '));
+      console.log(`  ${chalk.hex('#008F11')('0)')} ${chalk.hex('#005500')('Nova sessão')}\n`);
+      const choice = await ask(chalk.hex('#008F11')('Retomar? (0/1/2/3): '));
       const idx = parseInt(choice) - 1;
       if (idx >= 0 && idx < sessions.length) {
         const s = sessions[idx]!;
         this.messages.push({
           role: 'system',
-          content: `[SESSÃO RETOMADA (${s.cwd}, ${getTimeAgo(new Date(s.timestamp))})]: O usuário estava trabalhando em: ${s.summary}`
+          content: `[SESSÃO RETOMADA]: Trabalhando em: ${s.summary}`
         });
         logger.success(`Sessão ${idx + 1} restaurada.`);
       }
@@ -202,19 +216,86 @@ export class ChatLoop {
       if (this.messages.length > this.MAX_HISTORY_LENGTH) await this.compactHistory();
 
       const mode = this.planMode ? chalk.hex('#ADFF2F')('[PLAN] ') : '';
-      const userInput = await ask(mode + chalk.hex('#00FF41')('Mob >'));
+      const userInput = await ask(mode + chalk.hex('#00FF41')('Mob > '));
 
       if (!userInput) continue;
       if (userInput.toLowerCase() === '/exit' || userInput.toLowerCase() === 'exit') {
         await this.saveAndExit();
       }
-
       if (userInput.startsWith('/')) { await this.handleCommand(userInput); continue; }
 
-      this.messages.push({ role: 'user', content: userInput });
-      this.toolCache.invalidate(); // Nova mensagem = cache limpo
-      await this.processResponse();
+      // --- INTELIGÊNCIA: detecta complexidade e age diferente ---
+      if (isComplexTask(userInput) && !this.planMode) {
+        await this.handleComplexTask(userInput);
+      } else {
+        // Injeta snapshot do cwd como contexto
+        const snapshot = getCwdSnapshot();
+        if (snapshot) {
+          this.messages.push({ role: 'system', content: `[CWD]: ${snapshot}` });
+        }
+        this.messages.push({ role: 'user', content: userInput });
+        this.toolCache.invalidate();
+        await this.processResponse();
+      }
       this.showFooter();
+    }
+  }
+
+  // --- TAREFAS COMPLEXAS: plan-then-execute ---
+  private async handleComplexTask(userInput: string) {
+    logger.info('Tarefa complexa detectada. Planejando antes de executar...');
+
+    // Snapshot do ambiente
+    const snapshot = getCwdSnapshot();
+
+    // Fase 1: PLANEJAR (sem tools)
+    this.spinner.text = 'Planejando...';
+    this.spinner.start();
+
+    const planMessages = [
+      ...this.messages,
+      { role: 'system', content: `[CWD]: ${snapshot}` },
+      { role: 'user', content: `TAREFA: ${userInput}\n\nAntes de executar, crie um plano DETALHADO:\n1. Liste TODOS os arquivos que precisa criar/modificar\n2. Liste as dependências necessárias\n3. Liste os comandos que precisa rodar\n4. Ordene os passos para máxima paralelização\n\nResponda APENAS com o plano, NÃO execute nada ainda.` }
+    ];
+
+    try {
+      const planResponse = await this.service.chat(planMessages);
+      this.spinner.stop();
+
+      if (planResponse.content) {
+        smartOutput(planResponse.content, 'PLAN');
+
+        // Pergunta se quer executar
+        const confirm = await ask(chalk.hex('#ADFF2F')('  Executar este plano? (Y/n/edit) '));
+
+        if (confirm.toLowerCase() === 'n') {
+          logger.info('Plano cancelado.');
+          return;
+        }
+
+        let taskDescription = userInput;
+        if (confirm.toLowerCase() === 'edit') {
+          const edit = await ask(chalk.hex('#008F11')('Ajuste o pedido: '));
+          if (edit) taskDescription = edit;
+        }
+
+        // Fase 2: EXECUTAR com o plano como contexto
+        this.messages.push({ role: 'system', content: `[CWD]: ${snapshot}` });
+        this.messages.push({ role: 'user', content: taskDescription });
+        this.messages.push({
+          role: 'system',
+          content: `[PLANO APROVADO]: Siga este plano e execute TUDO de uma vez. Use múltiplas tool calls em paralelo.\n${planResponse.content}`
+        });
+
+        this.toolCache.invalidate();
+        await this.processResponse();
+      }
+    } catch (e: any) {
+      this.spinner.stop();
+      logger.error(`Erro no planejamento: ${e.message}`);
+      // Fallback: executa direto
+      this.messages.push({ role: 'user', content: userInput });
+      await this.processResponse();
     }
   }
 
@@ -232,28 +313,25 @@ export class ChatLoop {
         break;
       }
       case 'usage': this.showUsage(); break;
-      case 'auth': case 'model': {
-        await this.authMenu();
-        break;
-      }
+      case 'auth': case 'model': { await this.authMenu(); break; }
       case 'commit': {
         const msg = args.join(' ');
-        if (!msg) { logger.error('Uso: /commit <msg>'); break; }
+        if (!msg) { logger.error('/commit <msg>'); break; }
         smartOutput(this.allHandlers['git_commit']?.({ message: msg, files: '.' }) || '', 'GIT');
         break;
       }
-      case 'diff': smartOutput(this.allHandlers['git_diff']?.({ staged: false, file: args[0] || '' }) || 'Sem mudanças.', 'DIFF'); break;
+      case 'diff': smartOutput(this.allHandlers['git_diff']?.({ staged: false, file: args[0] || '' }) || 'Limpo.', 'DIFF'); break;
       case 'log': smartOutput(this.allHandlers['git_log']?.({ count: parseInt(args[0] || '10') }) || '', 'LOG'); break;
       case 'status': smartOutput(this.allHandlers['git_status']?.({}) || '', 'STATUS'); break;
       case 'plan': {
         this.planMode = !this.planMode;
-        logger.info(this.planMode ? 'PLAN MODE ON - só planeja, não executa.' : 'PLAN MODE OFF - execução normal.');
-        this.messages.push({
-          role: 'system',
-          content: this.planMode
-            ? '[PLAN MODE] NÃO use tools. Apenas planeje e liste passos.'
-            : '[PLAN OFF] Pode usar tools normalmente.'
-        });
+        if (this.planMode) {
+          logger.info('PLAN MODE ON - planeja sem executar.');
+          this.messages.push({ role: 'system', content: '[PLAN MODE] NÃO use tools. Analise, planeje, liste passos numerados. Identifique riscos.' });
+        } else {
+          logger.info('PLAN MODE OFF - execução normal.');
+          this.messages.push({ role: 'system', content: '[PLAN OFF] Execute normalmente.' });
+        }
         break;
       }
       case 'task': case 'tasks': {
@@ -261,7 +339,7 @@ export class ChatLoop {
         if (!sub || sub === 'list') this.showTasks();
         else if (sub === 'done') {
           const t = this.tasks.find(t => t.id === parseInt(args[1] || ''));
-          if (t) { t.status = 'done'; logger.success(`#${t.id} concluída.`); }
+          if (t) { t.status = 'done'; logger.success(`#${t.id} done.`); }
         }
         else if (sub === 'rm') { this.tasks = this.tasks.filter(t => t.id !== parseInt(args[1] || '')); }
         else {
@@ -272,14 +350,14 @@ export class ChatLoop {
       }
       case 'agent': {
         const obj = args.join(' ');
-        if (!obj) { logger.error('Uso: /agent <objetivo>'); break; }
+        if (!obj) { logger.error('/agent <objetivo>'); break; }
         this.spawnBackgroundAgent(obj);
         break;
       }
       case 'agents': this.showAgents(); break;
       case 'btw': {
         const q = args.join(' ');
-        if (!q) { logger.error('Uso: /btw <pergunta>'); break; }
+        if (!q) { logger.error('/btw <pergunta>'); break; }
         this.messages.push({ role: 'user', content: `[BTW breve] ${q}` });
         await this.processResponse();
         this.showFooter();
@@ -298,12 +376,14 @@ export class ChatLoop {
       case 'help': {
         console.log(chalk.hex('#00FF41')(`
  Comandos:
-  ${chalk.hex('#ADFF2F')('/auth')}  provider    ${chalk.hex('#ADFF2F')('/usage')}  tokens   ${chalk.hex('#ADFF2F')('/plan')}  toggle
+  ${chalk.hex('#ADFF2F')('/auth')}  provider    ${chalk.hex('#ADFF2F')('/usage')}  tokens   ${chalk.hex('#ADFF2F')('/plan')}  toggle plan
   ${chalk.hex('#ADFF2F')('/task <t>')}  add    ${chalk.hex('#ADFF2F')('/task done <id>')}     ${chalk.hex('#ADFF2F')('/task rm <id>')}
   ${chalk.hex('#ADFF2F')('/commit <m>')}       ${chalk.hex('#ADFF2F')('/diff')}            ${chalk.hex('#ADFF2F')('/log')}  ${chalk.hex('#ADFF2F')('/status')}
   ${chalk.hex('#ADFF2F')('/agent <p>')}  bg    ${chalk.hex('#ADFF2F')('/agents')}           ${chalk.hex('#ADFF2F')('/btw <q>')}  quick
-  ${chalk.hex('#ADFF2F')('/createskill')}      ${chalk.hex('#ADFF2F')('/memory')}           ${chalk.hex('#ADFF2F')('/skills')}
+  ${chalk.hex('#ADFF2F')('/createskill')}      ${chalk.hex('#ADFF2F')('/memory')}           ${chalk.hex('#ADFF2F')('/skills')}  ${chalk.hex('#ADFF2F')('/compact')}
   ${chalk.hex('#ADFF2F')('/exit')}  sair       ${chalk.hex('#ADFF2F')('Ctrl+C')}  cancela   ${chalk.hex('#ADFF2F')('Ctrl+D 2x')}  quit
+
+ Tarefas complexas são auto-detectadas: planeja antes de executar.
 `)); break;
       }
       default: logger.error(`/${command}? /help`);
@@ -321,88 +401,53 @@ export class ChatLoop {
   }
 
   private async authMenu() {
-    const cols = process.stdout.columns || 80;
-    const sep = chalk.hex('#003B00')('─'.repeat(cols));
-    const current = this.service.provider;
-    const currentModel = this.service.modelName;
+    const sep = chalk.hex('#003B00')('─'.repeat(process.stdout.columns || 80));
+    console.log(`\n${sep}\n${chalk.hex('#00FF41').bold('  PROVIDER & AUTH')}`);
+    console.log(`  Atual: ${chalk.hex('#ADFF2F').bold(this.service.provider)} / ${chalk.hex('#ADFF2F').bold(this.service.modelName)}\n${sep}`);
 
-    console.log(`\n${sep}`);
-    console.log(chalk.hex('#00FF41').bold('  PROVIDER & AUTH'));
-    console.log(`  Atual: ${chalk.hex('#ADFF2F').bold(current)} / ${chalk.hex('#ADFF2F').bold(currentModel)}`);
-    console.log(sep);
-
-    // Lista providers
     PROVIDERS.forEach((p, i) => {
-      const active = p.id === current ? chalk.hex('#ADFF2F')(' <-- ativo') : '';
-      const hasKey = process.env[p.envKey] ? chalk.hex('#00FF41')(' [key ok]') : chalk.hex('#005500')(' [sem key]');
+      const active = p.id === this.service.provider ? chalk.hex('#ADFF2F')(' <--') : '';
+      const hasKey = process.env[p.envKey] ? chalk.hex('#00FF41')(' [ok]') : chalk.hex('#005500')(' [sem key]');
       console.log(`  ${chalk.hex('#008F11')(`${i + 1})`)} ${chalk.hex('#ADFF2F')(p.name)}${hasKey}${active}`);
     });
-    console.log(`  ${chalk.hex('#008F11')('0)')} ${chalk.hex('#005500')('Cancelar')}\n`);
+    console.log(`  ${chalk.hex('#008F11')('0)')} Cancelar\n`);
 
-    const providerChoice = await ask(chalk.hex('#008F11')('Provider: '));
-    const idx = parseInt(providerChoice) - 1;
+    const idx = parseInt(await ask(chalk.hex('#008F11')('Provider: '))) - 1;
     if (idx < 0 || idx >= PROVIDERS.length) return;
-
     const provider = PROVIDERS[idx]!;
 
-    // Se é custom, pede base URL
     let baseURL = provider.baseURL;
     if (provider.id === 'custom') {
-      baseURL = await ask(chalk.hex('#008F11')('Base URL (OpenAI-compatible): '));
+      baseURL = await ask(chalk.hex('#008F11')('Base URL: '));
       if (!baseURL) return;
     }
 
-    // Checa se já tem key
-    const existingKey = process.env[provider.envKey];
-    let apiKey = existingKey || '';
-
-    if (existingKey) {
-      const masked = existingKey.substring(0, 8) + '...' + existingKey.substring(existingKey.length - 4);
-      console.log(chalk.hex('#008F11')(`\n  Key atual: ${masked}`));
-      const changeKey = await ask(chalk.hex('#008F11')('Trocar key? (y/N): '));
-      if (changeKey.toLowerCase() === 'y') {
-        apiKey = await ask(chalk.hex('#008F11')('Nova API Key: '));
+    const existing = process.env[provider.envKey];
+    let apiKey = existing || '';
+    if (existing) {
+      const masked = existing.substring(0, 6) + '...' + existing.substring(existing.length - 4);
+      console.log(chalk.hex('#008F11')(`  Key: ${masked}`));
+      if ((await ask(chalk.hex('#008F11')('Trocar? (y/N): '))).toLowerCase() === 'y') {
+        apiKey = await ask(chalk.hex('#008F11')('Nova key: '));
       }
     } else {
       apiKey = await ask(chalk.hex('#008F11')(`${provider.name} API Key: `));
     }
+    if (!apiKey || apiKey.length < 5) { logger.error('Key inválida.'); return; }
 
-    if (!apiKey || apiKey.length < 5) {
-      logger.error('Key inválida.');
-      return;
-    }
-
-    // Escolhe modelo
     let model = '';
     if (provider.models.length > 0) {
       console.log(chalk.hex('#00FF41')('\n  Modelos:'));
-      provider.models.forEach((m, i) => {
-        console.log(`  ${chalk.hex('#008F11')(`${i + 1})`)} ${chalk.hex('#ADFF2F')(m.name)} ${chalk.hex('#005500')(`- ${m.description}`)}`);
-      });
-      console.log(`  ${chalk.hex('#008F11')(`${provider.models.length + 1})`)} ${chalk.hex('#ADFF2F')('Custom')}\n`);
-
-      const modelChoice = await ask(chalk.hex('#008F11')('Modelo: '));
-      const mi = parseInt(modelChoice) - 1;
-      if (mi >= 0 && mi < provider.models.length) {
-        model = provider.models[mi]!.id;
-      } else {
-        model = await ask(chalk.hex('#008F11')('Nome do modelo: '));
-      }
+      provider.models.forEach((m, i) => console.log(`  ${i + 1}) ${chalk.hex('#ADFF2F')(m.name)} ${chalk.hex('#005500')(`- ${m.description}`)}`));
+      console.log(`  ${provider.models.length + 1}) Custom\n`);
+      const mi = parseInt(await ask(chalk.hex('#008F11')('Modelo: '))) - 1;
+      model = (mi >= 0 && mi < provider.models.length) ? provider.models[mi]!.id : await ask(chalk.hex('#008F11')('Nome: '));
     } else {
       model = await ask(chalk.hex('#008F11')('Nome do modelo: '));
     }
-
     if (!model) return;
 
-    // Salva e reconecta
-    saveConfig({
-      provider: provider.id,
-      model,
-      baseURL,
-      apiKey,
-      envKey: provider.envKey
-    });
-
+    saveConfig({ provider: provider.id, model, baseURL, apiKey, envKey: provider.envKey });
     this.service.reconnect(apiKey, baseURL, model, provider.id);
     logger.success(`Conectado: ${provider.name} / ${model}`);
     this.showFooter();
@@ -413,8 +458,9 @@ export class ChatLoop {
     const l = this.service.lastUsage;
     const sep = chalk.hex('#003B00')('─'.repeat(process.stdout.columns || 80));
     console.log(`\n${sep}\n${chalk.hex('#00FF41').bold('  TOKEN USAGE')}\n${sep}`);
-    console.log(`  Sessão: ${chalk.hex('#ADFF2F').bold(s.totalTokens.toLocaleString())} total (in:${s.promptTokens.toLocaleString()} out:${s.completionTokens.toLocaleString()}) | ${this.service.requestCount} reqs`);
-    console.log(`  Última: in:${l.promptTokens.toLocaleString()} out:${l.completionTokens.toLocaleString()} | ${this.service.modelName} | ${this.messages.length} msgs`);
+    console.log(`  Sessão: ${chalk.hex('#ADFF2F').bold(s.totalTokens.toLocaleString())} (in:${s.promptTokens.toLocaleString()} out:${s.completionTokens.toLocaleString()}) | ${this.service.requestCount} reqs`);
+    console.log(`  Última: in:${l.promptTokens.toLocaleString()} out:${l.completionTokens.toLocaleString()} | ${this.service.provider}/${this.service.modelName} | ${this.messages.length} msgs`);
+    console.log(`  Erros auto-corrigidos: ${this.consecutiveErrors > 0 ? this.consecutiveErrors : 'nenhum'}`);
     console.log(sep + '\n');
   }
 
@@ -429,14 +475,11 @@ export class ChatLoop {
     });
   }
 
-  // --- Session Save & Exit ---
   private async saveAndExit() {
-    // Salva resumo da sessão para próxima vez
     try {
       if (this.messages.length > 3) {
         const userMsgs = this.messages.filter(m => m.role === 'user').map(m => m.content).slice(-5);
-        const summary = userMsgs.join(' | ');
-        saveSession(summary.substring(0, 500), process.cwd());
+        saveSession(userMsgs.join(' | ').substring(0, 500), process.cwd());
         logger.dim('  Sessão salva.');
       }
     } catch { /* ok */ }
@@ -454,14 +497,13 @@ export class ChatLoop {
       try {
         const svc = new DeepSeekService();
         const msgs: any[] = [
-          { role: 'system', content: `Sub-agente. Direto e eficiente. cwd: ${process.cwd()}` },
+          { role: 'system', content: `Sub-agente VOIDCODE. Direto. Use múltiplas tools em paralelo. cwd: ${process.cwd()}` },
           { role: 'user', content: objective }
         ];
         for (let i = 0; i < 10; i++) {
           const r = await svc.chat(msgs, this.allTools as any);
           msgs.push(r);
           if (!r.tool_calls?.length) return r.content || 'Concluído.';
-          // Paralleliza tools do sub-agente
           const results = await Promise.all(r.tool_calls.map(async (tc: any) => {
             const h = this.allHandlers[tc.function.name];
             const res = h ? await h(safeJSONParse(tc.function.arguments)) : 'N/A';
@@ -489,23 +531,17 @@ export class ChatLoop {
     }
   }
 
-  // --- Response Processing com paralelização de tools ---
+  // --- Response Processing com retry e auto-correção ---
   private async processResponse() {
     this.spinner.start();
-
-    // Captura Ctrl+C durante execução para abortar tarefa
-    const sigintHandler = () => {
-      this.abortTask = true;
-      this.spinner.stop();
-      logger.warn('\n  (Ctrl+C) Abortando tarefa...');
-    };
+    const sigintHandler = () => { this.abortTask = true; this.spinner.stop(); logger.warn('\n  Abortando...'); };
     process.on('SIGINT', sigintHandler);
 
     try {
       let iterations = 0;
+      this.consecutiveErrors = 0;
+
       while (!this.abortTask && iterations++ < 25) {
-        // Smart tool selection: na 1a iteração, filtra tools pelo contexto do user
-        // Nas iterações seguintes (tool results), manda todas (o LLM pode precisar)
         let toolsToSend: any;
         if (this.planMode) {
           toolsToSend = undefined;
@@ -523,58 +559,55 @@ export class ChatLoop {
         if (response.content) smartOutput(response.content, 'VOIDCODE');
         if (!response.tool_calls?.length) break;
 
-        // --- PARALELIZAÇÃO: executa TODAS as tool calls ao mesmo tempo ---
         const toolCalls = response.tool_calls;
 
-        // Se insane mode, executa tudo em paralelo
         if (this.insaneMode) {
           const startTime = Date.now();
-
           const results = await Promise.all(toolCalls.map(async (tc: any) => {
             const name = tc.function.name;
             const toolArgs = safeJSONParse(tc.function.arguments);
             logger.tool(name, JSON.stringify(toolArgs));
 
-            // Checa cache primeiro
             const cacheKey = this.toolCache.key(name, toolArgs);
             const cached = this.toolCache.get(cacheKey);
-            if (cached) {
-              logger.dim(`  ${name} (cache hit)`);
-              return { role: 'tool' as const, tool_call_id: tc.id, content: cached };
-            }
+            if (cached) { logger.dim(`  ${name} (cache)`); return { role: 'tool' as const, tool_call_id: tc.id, content: cached }; }
 
             const handler = this.allHandlers[name];
             let result = handler ? await handler(toolArgs) : 'Tool não encontrada.';
             result = truncateToolOutput(String(result));
-
-            // Cacheia resultado
             this.toolCache.set(cacheKey, result);
+            if (['write_file', 'replace_file_content', 'git_commit', 'run_shell_command', 'patch_file'].includes(name)) this.toolCache.invalidate();
 
-            // Invalida cache se é operação de escrita
-            if (['write_file', 'replace_file_content', 'git_commit', 'run_shell_command'].includes(name)) {
-              this.toolCache.invalidate();
+            // --- AUTO-CORREÇÃO: detecta erros em tool results ---
+            if (result.startsWith('Erro:') || result.includes('MODULE_NOT_FOUND') || result.includes('ENOENT') || result.includes('command not found')) {
+              this.consecutiveErrors++;
+            } else {
+              this.consecutiveErrors = 0;
             }
 
             return { role: 'tool' as const, tool_call_id: tc.id, content: result };
           }));
 
           const elapsed = Date.now() - startTime;
-          logger.success(`${toolCalls.length} tools em ${elapsed}ms (paralelo)`);
+          logger.success(`${toolCalls.length} tools em ${elapsed}ms`);
           this.messages.push(...results);
+
+          // Se muitos erros seguidos, injeta dica de correção
+          if (this.consecutiveErrors >= 2) {
+            this.messages.push({
+              role: 'system',
+              content: `[AUTO-FIX] Detectados ${this.consecutiveErrors} erros seguidos nos tool results acima. Analise os erros, identifique a causa raiz e corrija. Não repita a mesma ação que falhou.`
+            });
+            logger.warn(`  Auto-correção: ${this.consecutiveErrors} erros detectados, instruindo LLM a corrigir.`);
+          }
         } else {
-          // Modo safe: sequencial com confirmação
           const results = [];
           for (const tc of toolCalls) {
             const name = tc.function.name;
             const toolArgs = safeJSONParse(tc.function.arguments);
             logger.tool(name, JSON.stringify(toolArgs));
-
             const answer = await ask(chalk.hex('#ADFF2F')(`  Autorizar ${name.toUpperCase()}? (Y/n) `));
-            if (answer.toLowerCase() === 'n') {
-              results.push({ role: 'tool' as const, tool_call_id: tc.id, content: 'Recusado.' });
-              continue;
-            }
-
+            if (answer.toLowerCase() === 'n') { results.push({ role: 'tool' as const, tool_call_id: tc.id, content: 'Recusado.' }); continue; }
             this.spinner.start();
             const handler = this.allHandlers[name];
             let result = handler ? await handler(toolArgs) : 'N/A';
@@ -585,7 +618,6 @@ export class ChatLoop {
           }
           this.messages.push(...results);
         }
-
         this.spinner.start();
       }
     } catch (error: any) {
@@ -598,21 +630,18 @@ export class ChatLoop {
     }
   }
 
-  // --- Compactação inteligente ---
+  // --- Compactação ---
   private async compactHistory() {
     logger.dim('  Compactando...');
     this.spinner.start();
-
     try {
       const r = await this.service.chat([
         ...this.messages,
         { role: 'user', content: 'Resuma em 3 frases: objetivos, arquivos alterados, estado atual.' }
       ]);
       this.spinner.stop();
-
       if (r?.content) {
         const sys = this.messages[0];
-        // Pega últimas mensagens mas sanitiza para não ter tool órfã
         const tail = this.sanitizeMessages(this.messages.slice(-6));
         this.messages = [sys, { role: 'system', content: `[CTX]: ${r.content}` }, ...tail];
         logger.success('Contexto compactado.');
@@ -620,32 +649,19 @@ export class ChatLoop {
     } catch { this.spinner.stop(); }
   }
 
-  // Remove mensagens tool órfãs (sem assistant+tool_calls antes)
   private sanitizeMessages(msgs: any[]): any[] {
     const clean: any[] = [];
     for (let i = 0; i < msgs.length; i++) {
       const msg = msgs[i];
       if (msg.role === 'tool') {
-        // Só inclui se a mensagem anterior é assistant com tool_calls
         const prev = clean[clean.length - 1];
-        if (prev?.role === 'assistant' && prev?.tool_calls?.length) {
-          clean.push(msg);
-        }
-        // Senão, descarta
+        if (prev?.role === 'assistant' && prev?.tool_calls?.length) clean.push(msg);
       } else if (msg.role === 'assistant' && msg.tool_calls?.length) {
-        // Inclui assistant com tool_calls só se as tools correspondentes estão no tail
-        const toolIds = new Set(msg.tool_calls.map((tc: any) => tc.id));
         const hasAllTools = msg.tool_calls.every((tc: any) =>
           msgs.slice(i + 1).some((m: any) => m.role === 'tool' && m.tool_call_id === tc.id)
         );
-        if (hasAllTools) {
-          clean.push(msg);
-        } else {
-          // Converte para assistant simples com texto
-          if (msg.content) {
-            clean.push({ role: 'assistant', content: msg.content });
-          }
-        }
+        if (hasAllTools) clean.push(msg);
+        else if (msg.content) clean.push({ role: 'assistant', content: msg.content });
       } else {
         clean.push(msg);
       }

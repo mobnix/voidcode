@@ -6,7 +6,7 @@ export class LLMPool {
   private connections = new Map<string, LLMService>();
   private _defaultProvider: string;
   private _defaultModel: string;
-  private _rateLimited = new Map<string, number>(); // provider → timestamp cooldown
+  private _rateLimited = new Map<string, { ts: number; count: number }>(); // cooldown adaptativo
 
   constructor() {
     this._defaultProvider = process.env.LLM_PROVIDER || 'deepseek';
@@ -70,19 +70,25 @@ export class LLMPool {
     return result;
   }
 
-  // Filtra providers com rate limit ativo (60s cooldown)
+  // Filtra providers com rate limit ativo (cooldown adaptativo: 60s, 120s, 300s, 600s)
   private getAvailableIds(): string[] {
     const now = Date.now();
     return [...this.connections.keys()].filter(id => {
-      const limited = this._rateLimited.get(id);
-      if (!limited) return true;
-      if (now - limited > 60_000) { this._rateLimited.delete(id); return true; }
+      const entry = this._rateLimited.get(id);
+      if (!entry) return true;
+      // Cooldown cresce: 60s → 120s → 300s → 600s (max 10min)
+      const cooldowns = [60_000, 120_000, 300_000, 600_000];
+      const cooldown = cooldowns[Math.min(entry.count - 1, cooldowns.length - 1)]!;
+      if (now - entry.ts > cooldown) { this._rateLimited.delete(id); return true; }
       return false;
     });
   }
 
   markRateLimited(providerId: string) {
-    this._rateLimited.set(providerId, Date.now());
+    const existing = this._rateLimited.get(providerId);
+    const count = existing ? existing.count + 1 : 1;
+    this._rateLimited.set(providerId, { ts: Date.now(), count });
+    return count;
   }
 
   getForTask(taskType: TaskType): LLMService {

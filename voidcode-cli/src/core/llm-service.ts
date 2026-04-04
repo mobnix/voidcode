@@ -164,32 +164,48 @@ export class LLMService {
       let toolCalls: any[] = [];
       let promptTokens = 0;
       let completionTokens = 0;
+      let lastChunkTime = Date.now();
+      const CHUNK_TIMEOUT = 30_000; // 30s sem chunk = abort
 
       process.stdout.write('\n' + chalk.hex('#00FF41').bold('VOIDCODE > '));
 
-      for await (const chunk of stream) {
-        const delta = chunk.choices[0]?.delta;
-        if (delta?.content) {
-          process.stdout.write(chalk.hex('#00FF41')(delta.content));
-          content += delta.content;
+      // Timeout watchdog por chunk
+      const chunkWatchdog = setInterval(() => {
+        if (Date.now() - lastChunkTime > CHUNK_TIMEOUT) {
+          clearInterval(chunkWatchdog);
+          try { (stream as any).controller?.abort(); } catch {}
+          process.stdout.write(chalk.yellow('\n  [stream timeout - continuando com o que tem]\n'));
         }
-        if (delta?.tool_calls) {
-          for (const tc of delta.tool_calls) {
-            if (tc.index !== undefined) {
-              while (toolCalls.length <= tc.index) {
-                toolCalls.push({ type: 'function', id: '', function: { name: '', arguments: '' } });
+      }, 5000);
+
+      try {
+        for await (const chunk of stream) {
+          lastChunkTime = Date.now();
+          const delta = chunk.choices[0]?.delta;
+          if (delta?.content) {
+            process.stdout.write(chalk.hex('#00FF41')(delta.content));
+            content += delta.content;
+          }
+          if (delta?.tool_calls) {
+            for (const tc of delta.tool_calls) {
+              if (tc.index !== undefined) {
+                while (toolCalls.length <= tc.index) {
+                  toolCalls.push({ type: 'function', id: '', function: { name: '', arguments: '' } });
+                }
+                const target = toolCalls[tc.index]!;
+                if (tc.id) target.id = tc.id;
+                if (tc.function?.name) target.function.name += tc.function.name;
+                if (tc.function?.arguments) target.function.arguments += tc.function.arguments;
               }
-              const target = toolCalls[tc.index]!;
-              if (tc.id) target.id = tc.id;
-              if (tc.function?.name) target.function.name += tc.function.name;
-              if (tc.function?.arguments) target.function.arguments += tc.function.arguments;
             }
           }
+          if (chunk.usage) {
+            promptTokens = chunk.usage.prompt_tokens;
+            completionTokens = chunk.usage.completion_tokens;
+          }
         }
-        if (chunk.usage) {
-          promptTokens = chunk.usage.prompt_tokens;
-          completionTokens = chunk.usage.completion_tokens;
-        }
+      } finally {
+        clearInterval(chunkWatchdog);
       }
 
       if (content) process.stdout.write('\n\n');

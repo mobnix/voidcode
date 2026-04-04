@@ -62,8 +62,8 @@ function getRL(): readline.Interface {
     rl.on('close', () => {
       ctrlDCount++;
       if (ctrlDTimer) clearTimeout(ctrlDTimer);
-      if (ctrlDCount >= 2) { destroyFixedFooter(); console.log(chalk.hex('#008F11')('\nGoodbye.')); process.exit(0); }
-      console.log(chalk.hex('#008F11')('\n  (Ctrl+D) Pressione novamente para sair.'));
+      if (ctrlDCount >= 2) { destroyFixedFooter(); process.stdout.write(chalk.hex('#008F11')('\nGoodbye.\n')); process.exit(0); }
+      process.stdout.write(chalk.hex('#008F11')('\n  (Ctrl+D) Pressione novamente para sair.\n'));
       rl = null;
       ctrlDTimer = setTimeout(() => { ctrlDCount = 0; }, 2000);
       getRL();
@@ -356,7 +356,9 @@ REGRAS CRÍTICAS:
       const leftBar = Math.floor(remaining / 2);
       const rightBar = remaining - leftBar;
       process.stdout.write(chalk.hex('#003B00')('─'.repeat(leftBar)) + chalk.hex('#008F11')(title) + chalk.hex('#003B00')('─'.repeat(rightBar)) + '\n');
+      this.showFooter(); // repinta footer pra garantir que prompt fica acima
       const userInput = await ask(busy + mode + chalk.hex('#00FF41')(' > '));
+      this.showFooter();
 
       if (!userInput) continue;
       if (userInput.toLowerCase() === '/exit' || userInput.toLowerCase() === 'exit') {

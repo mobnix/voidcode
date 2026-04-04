@@ -144,11 +144,17 @@ export class LLMService {
 
   async chatStream(messages: any[], tools?: any[]): Promise<any> {
     try {
+      const MAX_TOKENS_MAP: Record<string, number> = {
+        ollama: 4096, deepseek: 8192, groq: 8192, huggingface: 4096,
+        qwen: 8192, minimax: 8192, openai: 16384, gemini: 16384,
+      };
+      const maxTokens = MAX_TOKENS_MAP[this._provider] || 8192;
+
       const stream = await this.client.chat.completions.create({
         model: this._model,
         messages,
         temperature: 0.1,
-        max_tokens: 8192,
+        max_tokens: maxTokens,
         stream: true,
         tools: tools,
         tool_choice: tools ? 'auto' : undefined

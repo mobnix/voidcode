@@ -164,25 +164,55 @@ export class LLMService {
       let toolCalls: any[] = [];
       let promptTokens = 0;
       let completionTokens = 0;
+      const streamStart = Date.now();
       let lastChunkTime = Date.now();
-      const CHUNK_TIMEOUT = 30_000; // 30s sem chunk = abort
+      let toolArgsSize = 0;
+      let showedToolProgress = false;
+      const CHUNK_TIMEOUT = 30_000;  // 30s sem chunk nenhum
+      const STREAM_TIMEOUT = 120_000; // 2min total max
 
       process.stdout.write('\n' + chalk.hex('#00FF41').bold('VOIDCODE > '));
 
-      // Timeout watchdog por chunk
+      // Watchdog: chunk timeout + total timeout
       const chunkWatchdog = setInterval(() => {
-        if (Date.now() - lastChunkTime > CHUNK_TIMEOUT) {
+        const elapsed = Date.now() - streamStart;
+        const sinceLastChunk = Date.now() - lastChunkTime;
+
+        // Total timeout
+        if (elapsed > STREAM_TIMEOUT) {
           clearInterval(chunkWatchdog);
           try { (stream as any).controller?.abort(); } catch {}
-          process.stdout.write(chalk.yellow('\n  [stream timeout - continuando com o que tem]\n'));
+          process.stdout.write(chalk.yellow(`\n  [timeout ${Math.round(elapsed/1000)}s]\n`));
+          return;
         }
-      }, 5000);
+
+        // Chunk timeout (nenhum chunk)
+        if (sinceLastChunk > CHUNK_TIMEOUT) {
+          clearInterval(chunkWatchdog);
+          try { (stream as any).controller?.abort(); } catch {}
+          process.stdout.write(chalk.yellow('\n  [stream parou]\n'));
+          return;
+        }
+
+        // Progress pra tool calls grandes (ex: write_file com HTML)
+        if (toolArgsSize > 0 && !showedToolProgress) {
+          const name = toolCalls[0]?.function?.name || 'tool';
+          process.stdout.write(chalk.hex('#005500')(`  ${name} ...`));
+          showedToolProgress = true;
+        }
+        if (showedToolProgress && toolArgsSize > 0) {
+          const kb = (toolArgsSize / 1024).toFixed(1);
+          const sec = Math.round(elapsed / 1000);
+          process.stdout.write(`\r${chalk.hex('#005500')(`  gerando ${kb}KB ${sec}s`)}`);
+        }
+      }, 2000);
 
       try {
         for await (const chunk of stream) {
           lastChunkTime = Date.now();
           const delta = chunk.choices[0]?.delta;
           if (delta?.content) {
+            if (showedToolProgress) { process.stdout.write('\r\x1b[2K'); showedToolProgress = false; }
             process.stdout.write(chalk.hex('#00FF41')(delta.content));
             content += delta.content;
           }
@@ -195,7 +225,10 @@ export class LLMService {
                 const target = toolCalls[tc.index]!;
                 if (tc.id) target.id = tc.id;
                 if (tc.function?.name) target.function.name += tc.function.name;
-                if (tc.function?.arguments) target.function.arguments += tc.function.arguments;
+                if (tc.function?.arguments) {
+                  target.function.arguments += tc.function.arguments;
+                  toolArgsSize += tc.function.arguments.length;
+                }
               }
             }
           }
@@ -206,6 +239,7 @@ export class LLMService {
         }
       } finally {
         clearInterval(chunkWatchdog);
+        if (showedToolProgress) process.stdout.write('\r\x1b[2K');
       }
 
       if (content) process.stdout.write('\n\n');

@@ -291,13 +291,14 @@ REGRAS CRÍTICAS:
         // Mostra últimas linhas do terminal pra user lembrar o que aconteceu
         const savedLog = (last as any).terminalLog as string[] | undefined;
         if (savedLog?.length) {
-          const sep = chalk.hex('#003B00')('─'.repeat(process.stdout.columns || 80));
-          console.log(sep);
-          console.log(chalk.hex('#008F11').bold('  HISTÓRICO DO TERMINAL:\n'));
+          const cols = process.stdout.columns || 80;
+          const sep = chalk.hex('#003B00')('─'.repeat(cols));
+          process.stdout.write(sep + '\n');
+          process.stdout.write(chalk.hex('#008F11').bold('  HISTÓRICO DO TERMINAL:') + '\n\n');
           for (const line of savedLog) {
-            console.log(chalk.hex('#005500')(line));
+            process.stdout.write(chalk.hex('#005500')(line) + '\n');
           }
-          console.log(sep);
+          process.stdout.write(sep + '\n\n');
         }
       } else {
         logger.warn('Sem sessão anterior para continuar.');

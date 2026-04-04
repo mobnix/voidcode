@@ -2,8 +2,11 @@ import chalk from 'chalk';
 import readline from 'node:readline';
 import fs from 'node:fs';
 import path from 'node:path';
-import { DeepSeekService, saveConfig } from '../core/deepseek.js';
-import { PROVIDERS } from '../core/providers.js';
+import { saveConfig, removeConfigKey, loadConfig } from '../core/deepseek.js';
+import { LLMService } from '../core/llm-service.js';
+import { LLMPool } from '../core/pool.js';
+import { detectProviderOverride, stripProviderOverride } from '../core/router.js';
+import { PROVIDERS, NO_TOOLS_MODELS } from '../core/providers.js';
 import { logger, smartOutput, truncateToolOutput, renderFooter, initFixedFooter, destroyFixedFooter, toolProgress } from '../utils/ui.js';
 import { tools, toolHandlers, getToolSubset } from '../tools/index.js';
 import { loadSkills } from '../skills/index.js';
@@ -174,33 +177,44 @@ function isComplexTask(input: string): boolean {
 }
 
 export class ChatLoop {
-  private service: DeepSeekService;
+  private pool: LLMPool;
+  private service: LLMService; // service ativo (pode mudar por roteamento)
   private messages: any[] = [];
   private insaneMode: boolean;
   private planMode = false;
   private abortTask = false;
   private allTools: any[] = [];
   private allHandlers: Record<string, (args: any) => any> = {};
-  private readonly MAX_HISTORY_LENGTH = 10;
+  private readonly MAX_HISTORY_LENGTH = 50;
   private activeAgents: Map<string, { promise: Promise<string>; objective: string; startedAt: Date; status: string; iteration: number }> = new Map();
   private agentCounter = 0;
   private tasks: Task[] = [];
   private taskCounter = 0;
   private toolCache = new ToolCache();
   private consecutiveErrors = 0;
+  private _callHistory: string[] = [];
   private telegramBot: TelegramBridge | null = null;
-  private processing = false; // true quando está processando uma tarefa
-  private taskQueue: string[] = []; // fila de inputs pendentes
+  private processing = false;
+  private taskQueue: string[] = [];
 
   constructor(insaneMode = false) {
-    this.service = new DeepSeekService();
+    this.pool = new LLMPool();
+    this.service = this.pool.getDefault();
     this.insaneMode = insaneMode;
 
-    const systemPrompt = `VOIDCODE, engenheiro sênior. Conciso.
-O INDEX abaixo já lista todos os arquivos do projeto. NÃO use list_directory se o arquivo está no index. Vá direto no arquivo que precisa.
-Tools em paralelo. Deps antes de rodar. background:true para servers. read_file_lines+patch_file para editar.
+    const modelName = process.env.LLM_MODEL || 'deepseek-chat';
+    const noTools = NO_TOOLS_MODELS.has(modelName);
+
+    let systemPrompt = `VOIDCODE, engenheiro sênior. Conciso.
+O INDEX abaixo já lista todos os arquivos do projeto. Vá direto no arquivo que precisa.
 ${this.insaneMode ? 'Execute direto.' : 'Peça permissão.'}
 cwd: ${process.cwd()}`;
+
+    if (noTools) {
+      systemPrompt += `\nVocê NÃO tem acesso a tools. Para executar ações, responda com JSON:\n{"name":"tool_name","arguments":{"param":"value"}}\nTools disponíveis: list_directory, read_file, read_file_lines, write_file, replace_file_content, patch_file, grep_search, glob_files, run_shell_command, git_status, git_diff, git_log, git_commit.`;
+    } else {
+      systemPrompt += `\nTools em paralelo. Deps antes de rodar. background:true para servers. read_file_lines+patch_file para editar.`;
+    }
 
     this.messages.push({ role: 'system', content: systemPrompt });
 
@@ -238,7 +252,7 @@ cwd: ${process.cwd()}`;
     this.showFooter();
 
     while (true) {
-      if (this.messages.length > this.MAX_HISTORY_LENGTH) await this.compactHistory();
+      if (this.messages.length > this.MAX_HISTORY_LENGTH) this.quickCompact();
 
       const mode = this.planMode ? chalk.hex('#ADFF2F')('[PLAN] ') : '';
       const busy = this.processing ? chalk.hex('#008F11')('[busy] ') : '';
@@ -254,17 +268,37 @@ cwd: ${process.cwd()}`;
       }
       if (userInput.startsWith('/')) { await this.handleCommand(userInput); continue; }
 
+      // Detecta override de provider: @gemini, @deepseek, etc.
+      const override = detectProviderOverride(userInput);
+      let actualInput = userInput;
+      if (override) {
+        const svc = this.pool.get(override);
+        if (svc) {
+          this.service = svc;
+          actualInput = stripProviderOverride(userInput);
+          logger.dim(`  → ${override}/${svc.modelName}`);
+        } else {
+          logger.error(`Provider ${override} não conectado. Use /auth`);
+          continue;
+        }
+      } else if (this.pool.activeCount > 1) {
+        // Roteamento automático
+        const { service, taskType, routed } = this.pool.getForMessage(actualInput);
+        this.service = service;
+        if (routed) logger.dim(`  → ${service.provider}/${service.modelName} (${taskType})`);
+      }
+
       // Se já está processando, spawna agente paralelo (sem limite)
       if (this.processing) {
-        const preview = userInput.length > 60 ? userInput.substring(0, 60) + '...' : userInput;
+        const preview = actualInput.length > 60 ? actualInput.substring(0, 60) + '...' : actualInput;
         logger.info(`[+agent] "${preview}"`);
-        this.spawnBackgroundAgent(userInput);
+        this.spawnBackgroundAgent(actualInput);
         continue;
       }
 
       // Primeira tarefa: roda em background, prompt fica livre
       this.processing = true;
-      this.executeTaskBackground(userInput);
+      this.executeTaskBackground(actualInput);
     }
   }
 
@@ -276,6 +310,7 @@ cwd: ${process.cwd()}`;
         } else {
           this.messages.push({ role: 'user', content: userInput });
           this.toolCache.invalidate();
+          this._callHistory = [];
           await this.processResponse();
         }
       } catch (e: any) {
@@ -471,72 +506,174 @@ cwd: ${process.cwd()}`;
 
   private async authMenu() {
     const sep = chalk.hex('#003B00')('─'.repeat(process.stdout.columns || 80));
-    const defaultProvider = process.env.LLM_PROVIDER || 'deepseek';
-    const defaultModel = process.env.LLM_MODEL || 'deepseek-chat';
 
-    console.log(`\n${sep}\n${chalk.hex('#00FF41').bold('  PROVIDER & AUTH')}`);
-    console.log(`  Atual: ${chalk.hex('#ADFF2F').bold(this.service.provider)} / ${chalk.hex('#ADFF2F').bold(this.service.modelName)}`);
-    console.log(`  Default: ${chalk.hex('#005500')(defaultProvider)} / ${chalk.hex('#005500')(defaultModel)}\n${sep}`);
+    console.log(`\n${sep}\n${chalk.hex('#00FF41').bold('  PROVIDERS CONECTADOS')}`);
+    console.log(chalk.hex('#005500')(`  Routing: ${this.pool.activeCount > 1 ? 'AUTO' : 'SINGLE'} (${this.pool.activeCount} provider${this.pool.activeCount !== 1 ? 's' : ''} ativo${this.pool.activeCount !== 1 ? 's' : ''})`));
+    console.log(sep);
 
     PROVIDERS.forEach((p, i) => {
-      const active = p.id === this.service.provider ? chalk.hex('#ADFF2F')(' ◀ ativo') : '';
-      const isDefault = p.id === defaultProvider ? chalk.hex('#008F11')(' ★ default') : '';
-      const hasKey = process.env[p.envKey] ? chalk.hex('#00FF41')(' [key ok]') : chalk.hex('#005500')(' [sem key]');
-      console.log(`  ${chalk.hex('#008F11')(`${i + 1})`)} ${chalk.hex('#ADFF2F')(p.name)}${hasKey}${active}${isDefault}`);
+      if (p.id === 'custom' && !process.env[p.envKey]) return;
+      const connected = this.pool.get(p.id);
+      const status = connected ? chalk.hex('#00FF41')('[✓ ativo]') : chalk.hex('#005500')('[✗ sem key]');
+      const isDefault = p.id === this.pool.defaultProvider ? chalk.hex('#ADFF2F')(' ◀ default') : '';
+      const modelInfo = connected ? chalk.hex('#005500')(` (${connected.modelName})`) : '';
+      const caps = p.models[0]?.capabilities?.join(', ') || '';
+      const capsStr = caps ? chalk.hex('#005500')(` [${caps}]`) : '';
+      console.log(`  ${chalk.hex('#008F11')(`${i + 1})`)} ${chalk.hex('#ADFF2F')(p.name)} ${status}${isDefault}${modelInfo}${capsStr}`);
     });
-    console.log(`  ${chalk.hex('#008F11')('0)')} Cancelar\n`);
 
-    const idx = parseInt(await ask(chalk.hex('#008F11')('Provider: '))) - 1;
-    if (idx < 0 || idx >= PROVIDERS.length) return;
-    const provider = PROVIDERS[idx]!;
+    console.log(`\n  ${chalk.hex('#ADFF2F')('A)')} Adicionar/atualizar provider`);
+    console.log(`  ${chalk.hex('#ADFF2F')('D)')} Mudar provider padrão`);
+    console.log(`  ${chalk.hex('#ADFF2F')('M)')} Mudar modelo do provider ativo`);
+    console.log(`  ${chalk.hex('#ADFF2F')('R)')} Remover provider`);
+    console.log(`  ${chalk.hex('#008F11')('0)')} Voltar\n`);
 
-    let baseURL = provider.baseURL;
-    if (provider.id === 'custom') {
-      baseURL = await ask(chalk.hex('#008F11')('Base URL: '));
-      if (!baseURL) return;
-    }
+    const choice = (await ask(chalk.hex('#008F11')('Opção: '))).toLowerCase();
 
-    const existing = process.env[provider.envKey];
-    let apiKey = existing || '';
-    if (existing) {
-      const masked = existing.substring(0, 6) + '...' + existing.substring(existing.length - 4);
-      console.log(chalk.hex('#008F11')(`  Key: ${masked}`));
-      if ((await ask(chalk.hex('#008F11')('Trocar? (y/N): '))).toLowerCase() === 'y') {
-        apiKey = await ask(chalk.hex('#008F11')('Nova key: '));
+    switch (choice) {
+      case 'a': case 'add': {
+        // Listar providers para adicionar
+        console.log(chalk.hex('#00FF41')('\n  Providers disponíveis:'));
+        PROVIDERS.forEach((p, i) => {
+          if (p.id === 'custom') return;
+          const hasKey = this.pool.get(p.id) ? chalk.hex('#00FF41')(' ✓') : '';
+          console.log(`  ${i + 1}) ${chalk.hex('#ADFF2F')(p.name)}${hasKey}`);
+        });
+        const idx = parseInt(await ask(chalk.hex('#008F11')('\nProvider: '))) - 1;
+        if (idx < 0 || idx >= PROVIDERS.length) return;
+        const provider = PROVIDERS[idx]!;
+
+        let baseURL = provider.baseURL;
+        let apiKey = '';
+
+        if (provider.id === 'ollama') {
+          apiKey = 'ollama';
+          const host = await ask(chalk.hex('#008F11')(`Ollama host (${baseURL}): `));
+          if (host) baseURL = host;
+        } else {
+          const existing = process.env[provider.envKey];
+          if (existing) {
+            const masked = existing.substring(0, 6) + '...' + existing.substring(existing.length - 4);
+            console.log(chalk.hex('#008F11')(`  Key atual: ${masked}`));
+            const change = await ask(chalk.hex('#008F11')('Trocar key? (y/N): '));
+            apiKey = change.toLowerCase() === 'y' ? await ask(chalk.hex('#008F11')('Nova key: ')) : existing;
+          } else {
+            apiKey = await ask(chalk.hex('#008F11')(`${provider.name} API Key: `));
+          }
+          if (!apiKey || apiKey.length < 5) { logger.error('Key inválida.'); return; }
+        }
+
+        // Escolher modelo
+        let model = provider.models[0]?.id || '';
+        if (provider.models.length > 1) {
+          console.log(chalk.hex('#00FF41')('\n  Modelos:'));
+          provider.models.forEach((m, i) => {
+            console.log(`  ${i + 1}) ${chalk.hex('#ADFF2F')(m.name)} ${chalk.hex('#005500')(`- ${m.description} [${m.contextWindow/1000}k ctx, ${m.costTier}]`)}`);
+          });
+          const mi = parseInt(await ask(chalk.hex('#008F11')('Modelo: '))) - 1;
+          if (mi >= 0 && mi < provider.models.length) model = provider.models[mi]!.id;
+        }
+        if (!model) return;
+
+        // Salva key e adiciona ao pool
+        saveConfig({ apiKey, envKey: provider.envKey });
+        this.pool.addProvider(provider.id, apiKey, baseURL, model);
+        logger.success(`✓ ${provider.name}/${model} conectado`);
+
+        // Se é o primeiro provider, seta como default
+        if (this.pool.activeCount === 1) {
+          this.pool.setDefault(provider.id, model);
+          saveConfig({ provider: provider.id, model, baseURL });
+          this.service = this.pool.getDefault();
+        }
+        break;
       }
-    } else {
-      apiKey = await ask(chalk.hex('#008F11')(`${provider.name} API Key: `));
-    }
-    if (!apiKey || apiKey.length < 5) { logger.error('Key inválida.'); return; }
 
-    let model = '';
-    if (provider.models.length > 0) {
-      console.log(chalk.hex('#00FF41')('\n  Modelos:'));
-      provider.models.forEach((m, i) => {
-        const def = m.id === defaultModel && provider.id === defaultProvider ? chalk.hex('#008F11')(' ★') : '';
-        console.log(`  ${i + 1}) ${chalk.hex('#ADFF2F')(m.name)} ${chalk.hex('#005500')(`- ${m.description}`)}${def}`);
-      });
-      console.log(`  ${provider.models.length + 1}) Custom\n`);
-      const mi = parseInt(await ask(chalk.hex('#008F11')('Modelo: '))) - 1;
-      model = (mi >= 0 && mi < provider.models.length) ? provider.models[mi]!.id : await ask(chalk.hex('#008F11')('Nome: '));
-    } else {
-      model = await ask(chalk.hex('#008F11')('Nome do modelo: '));
-    }
-    if (!model) return;
+      case 'd': case 'default': {
+        const available = this.pool.getAvailable();
+        if (available.length === 0) { logger.error('Nenhum provider conectado.'); return; }
+        console.log(chalk.hex('#00FF41')('\n  Providers ativos:'));
+        available.forEach((a, i) => {
+          const def = a.providerId === this.pool.defaultProvider ? chalk.hex('#ADFF2F')(' ◀ atual') : '';
+          console.log(`  ${i + 1}) ${chalk.hex('#ADFF2F')(a.provider.name)} / ${a.model}${def}`);
+        });
+        const di = parseInt(await ask(chalk.hex('#008F11')('Novo default: '))) - 1;
+        if (di < 0 || di >= available.length) return;
+        const pick = available[di]!;
+        this.pool.setDefault(pick.providerId, pick.model);
+        this.service = this.pool.getDefault();
+        saveConfig({ provider: pick.providerId, model: pick.model, baseURL: pick.provider.baseURL });
+        logger.success(`★ Default: ${pick.provider.name}/${pick.model}`);
+        break;
+      }
 
-    // Conecta
-    this.service.reconnect(apiKey, baseURL, model, provider.id);
-    logger.success(`Conectado: ${provider.name} / ${model}`);
+      case 'm': case 'model': {
+        const available = this.pool.getAvailable();
+        if (available.length === 0) { logger.error('Nenhum provider conectado.'); return; }
+        console.log(chalk.hex('#00FF41')('\n  Providers ativos:'));
+        available.forEach((a, i) => {
+          console.log(`  ${i + 1}) ${chalk.hex('#ADFF2F')(a.provider.name)} / ${a.model}`);
+        });
+        const pi = parseInt(await ask(chalk.hex('#008F11')('Provider: '))) - 1;
+        if (pi < 0 || pi >= available.length) return;
+        const prov = available[pi]!;
+        const provDef = PROVIDERS.find(p => p.id === prov.providerId);
+        if (!provDef?.models.length) { logger.error('Sem modelos.'); return; }
+        console.log(chalk.hex('#00FF41')('\n  Modelos:'));
+        provDef.models.forEach((m, i) => {
+          const cur = m.id === prov.model ? chalk.hex('#ADFF2F')(' ◀ atual') : '';
+          console.log(`  ${i + 1}) ${chalk.hex('#ADFF2F')(m.name)} ${chalk.hex('#005500')(`[${m.contextWindow/1000}k, ${m.costTier}]`)}${cur}`);
+        });
+        const mi = parseInt(await ask(chalk.hex('#008F11')('Modelo: '))) - 1;
+        if (mi < 0 || mi >= provDef.models.length) return;
+        const newModel = provDef.models[mi]!.id;
+        const svc = this.pool.get(prov.providerId);
+        if (svc) svc.setModel(newModel);
+        if (prov.providerId === this.pool.defaultProvider) {
+          this.pool.setDefaultModel(newModel);
+          saveConfig({ model: newModel });
+        }
+        logger.success(`Modelo: ${prov.provider.name}/${newModel}`);
+        break;
+      }
 
-    // Pergunta se quer salvar como default
-    const setDefault = await ask(chalk.hex('#008F11')('Salvar como default? (Y/n): '));
-    if (setDefault.toLowerCase() !== 'n') {
-      saveConfig({ provider: provider.id, model, baseURL, apiKey, envKey: provider.envKey });
-      logger.success(`★ Default salvo: ${provider.name} / ${model}`);
-    } else {
-      // Salva só a key (sem trocar provider/model default)
-      saveConfig({ apiKey, envKey: provider.envKey });
-      logger.info(`Usando ${provider.name} / ${model} só nesta sessão.`);
+      case 'r': case 'remove': {
+        const available = this.pool.getAvailable();
+        if (available.length === 0) { logger.error('Nenhum provider conectado.'); return; }
+        console.log(chalk.hex('#00FF41')('\n  Remover provider:'));
+        available.forEach((a, i) => {
+          console.log(`  ${i + 1}) ${chalk.hex('#ADFF2F')(a.provider.name)} / ${a.model}`);
+        });
+        const ri = parseInt(await ask(chalk.hex('#008F11')('Remover: '))) - 1;
+        if (ri < 0 || ri >= available.length) return;
+        const rem = available[ri]!;
+        const confirm = await ask(chalk.hex('#ADFF2F')(`  Remover ${rem.provider.name}? Key será apagada. (y/N): `));
+        if (confirm.toLowerCase() !== 'y') return;
+        this.pool.removeProvider(rem.providerId);
+        removeConfigKey(rem.provider.envKey);
+        this.service = this.pool.getDefault();
+        logger.success(`${rem.provider.name} removido.`);
+        break;
+      }
+
+      default: {
+        // Se digitou número, tenta como atalho pra adicionar
+        const idx = parseInt(choice) - 1;
+        if (idx >= 0 && idx < PROVIDERS.length) {
+          // Redireciona pra add com este provider pré-selecionado
+          const provider = PROVIDERS[idx]!;
+          if (this.pool.get(provider.id)) {
+            // Já conectado, troca pra ele como default
+            const svc = this.pool.get(provider.id)!;
+            this.pool.setDefault(provider.id, svc.modelName);
+            this.service = svc;
+            saveConfig({ provider: provider.id, model: svc.modelName, baseURL: provider.baseURL });
+            logger.success(`★ Default: ${provider.name}/${svc.modelName}`);
+          } else {
+            logger.info(`Use a opção A para adicionar ${provider.name}.`);
+          }
+        }
+      }
     }
 
     this.showFooter();
@@ -676,7 +813,8 @@ cwd: ${process.cwd()}`;
 
       // Processa e captura resposta
       this.messages = this.sanitizeMessages(this.messages);
-      const response = await this.service.chat(this.messages, this.allTools as any);
+      const tgService = this.pool.getDefault();
+      const response = await tgService.chat(this.messages, this.allTools as any);
       this.messages.push(response);
 
       // Se tem tool calls, executa
@@ -691,7 +829,7 @@ cwd: ${process.cwd()}`;
 
         // Segunda chamada para resposta final
         this.messages = this.sanitizeMessages(this.messages);
-        const finalResponse = await this.service.chat(this.messages, this.allTools as any);
+        const finalResponse = await tgService.chat(this.messages, this.allTools as any);
         this.messages.push(finalResponse);
         return finalResponse.content || 'Executado (sem resposta texto).';
       }
@@ -703,13 +841,19 @@ cwd: ${process.cwd()}`;
   }
 
   private showUsage() {
-    const s = this.service.sessionUsage;
-    const l = this.service.lastUsage;
     const sep = chalk.hex('#003B00')('─'.repeat(process.stdout.columns || 80));
     console.log(`\n${sep}\n${chalk.hex('#00FF41').bold('  TOKEN USAGE')}\n${sep}`);
-    console.log(`  Sessão: ${chalk.hex('#ADFF2F').bold(s.totalTokens.toLocaleString())} (in:${s.promptTokens.toLocaleString()} out:${s.completionTokens.toLocaleString()}) | ${this.service.requestCount} reqs`);
-    console.log(`  Última: in:${l.promptTokens.toLocaleString()} out:${l.completionTokens.toLocaleString()} | ${this.service.provider}/${this.service.modelName} | ${this.messages.length} msgs`);
-    console.log(`  Erros auto-corrigidos: ${this.consecutiveErrors > 0 ? this.consecutiveErrors : 'nenhum'}`);
+
+    // Per-provider breakdown
+    const perProvider = this.pool.usagePerProvider();
+    for (const p of perProvider) {
+      if (p.requests === 0) continue;
+      console.log(`  ${chalk.hex('#ADFF2F')(p.provider.padEnd(12))} ${chalk.hex('#008F11')(`in:${p.usage.promptTokens.toLocaleString().padEnd(8)} out:${p.usage.completionTokens.toLocaleString().padEnd(8)}`)} ${chalk.hex('#005500')(`(${p.requests} reqs) ${p.model}`)}`);
+    }
+
+    const agg = this.pool.aggregatedUsage;
+    console.log(`  ${chalk.hex('#00FF41').bold('Total'.padEnd(12))} ${chalk.hex('#ADFF2F').bold(`in:${agg.promptTokens.toLocaleString().padEnd(8)} out:${agg.completionTokens.toLocaleString().padEnd(8)}`)} ${chalk.hex('#005500')(`(${this.pool.totalRequests} reqs)`)}`);
+    console.log(`  Providers: ${this.pool.activeCount} | Msgs: ${this.messages.length} | Erros: ${this.consecutiveErrors || 'nenhum'}`);
     console.log(sep + '\n');
   }
 
@@ -717,10 +861,11 @@ cwd: ${process.cwd()}`;
     renderFooter({
       model: `${this.service.provider}/${this.service.modelName}`,
       mode: this.planMode ? 'PLAN' : this.insaneMode ? 'INSANE' : 'SAFE',
-      tokens: this.service.sessionUsage,
-      requests: this.service.requestCount,
+      tokens: this.pool.aggregatedUsage,
+      requests: this.pool.totalRequests,
       cwd: process.cwd(),
-      messagesCount: this.messages.length
+      messagesCount: this.messages.length,
+      activeProviders: this.pool.activeCount
     });
   }
 
@@ -750,7 +895,7 @@ cwd: ${process.cwd()}`;
 
     const promise = (async () => {
       try {
-        const svc = new DeepSeekService();
+        const svc = this.pool.getForTask('sub_agent');
         const msgs: any[] = [
           { role: 'system', content: `Sub-agente VOIDCODE. Direto. Tools em paralelo. cwd: ${process.cwd()}` },
           { role: 'user', content: objective }
@@ -833,7 +978,7 @@ cwd: ${process.cwd()}`;
     const interval = setInterval(() => {
       if (stopped) return;
       const sec = Math.round((Date.now() - start) / 1000);
-      const tokens = this.service.sessionUsage.totalTokens;
+      const tokens = this.pool.aggregatedUsage.totalTokens;
       process.stdout.write(`\r${chalk.hex('#005500')(`  ${label} ${sec}s | ${tokens > 1000 ? (tokens/1000).toFixed(1)+'k' : tokens} tokens`)}`);
       // Watchdog: se passou de 70s, aborta (o timeout da API é 60s, dá margem)
       if (sec > 70 && !this.abortTask) {
@@ -856,7 +1001,7 @@ cwd: ${process.cwd()}`;
   private async processResponse() {
     const sigintHandler = () => {
       this.abortTask = true;
-      this.service.abort(); // Cancela a request HTTP em andamento
+      this.pool.abortAll();
       logger.warn('\nAbortado.');
     };
     process.on('SIGINT', sigintHandler);
@@ -866,7 +1011,8 @@ cwd: ${process.cwd()}`;
       this.consecutiveErrors = 0;
 
       const lastUserMsg = [...this.messages].reverse().find(m => m.role === 'user');
-      const selectedTools = this.planMode ? undefined : (lastUserMsg ? getToolSubset(lastUserMsg.content) : this.allTools);
+      const modelNoTools = NO_TOOLS_MODELS.has(this.service.modelName);
+      const selectedTools = (this.planMode || modelNoTools) ? undefined : (lastUserMsg ? getToolSubset(lastUserMsg.content) : this.allTools);
 
       while (!this.abortTask && iterations++ < 25) {
         let toolsToSend = selectedTools;
@@ -893,10 +1039,44 @@ cwd: ${process.cwd()}`;
         }
         stopTimer();
 
-        // Resposta vazia = morte silenciosa
+        // Limpa tokens especiais de modelos locais (Qwen, Llama, etc)
+        if (response.content) {
+          response.content = response.content.replace(/<\|im_start\|>|<\|im_end\|>|<\|endoftext\|>|<s>|<\/s>/g, '').trim();
+        }
+
         if (!response || (!response.content && !response.tool_calls?.length)) {
-          logger.warn('Resposta vazia da API. Encerrando loop.');
+          logger.warn('Resposta vazia. Encerrando.');
           break;
+        }
+
+        // Detecção de loop: mesma tool+args exata repetiu = loop
+        if (response.tool_calls?.length) {
+          const callSig = response.tool_calls.map((tc: any) => `${tc.function.name}:${tc.function.arguments}`).join('|');
+          const repeatCount = this._callHistory.filter(s => s === callSig).length;
+          this._callHistory.push(callSig);
+
+          if (repeatCount >= 1) {
+            logger.warn('Loop detectado. Forçando resposta.');
+            // NÃO push response com tool_calls (causaria erro 400)
+            // Injeta instrução e pede resposta texto
+            this.messages.push({ role: 'user', content: 'Você já coletou informação suficiente. Pare de ler arquivos e responda minha pergunta original com o que já sabe. NÃO use mais tools.' });
+            const finalResp = await this.service.chat(this.messages); // sem tools
+            if (finalResp?.content) {
+              let content = finalResp.content.replace(/<\|im_start\|>|<\|im_end\|>|<\|endoftext\|>|<s>|<\/s>/g, '').trim();
+              if (content) smartOutput(content, 'VOIDCODE');
+              this.messages.push({ role: 'assistant', content });
+            }
+            break;
+          }
+        }
+
+        // Ollama/modelos locais: tool calls podem vir como JSON no content
+        if (response.content && !response.tool_calls?.length) {
+          const parsed = this.parseToolCallFromContent(response.content);
+          if (parsed) {
+            response.tool_calls = [parsed];
+            response.content = null;
+          }
         }
 
         this.messages.push(response);
@@ -977,6 +1157,31 @@ cwd: ${process.cwd()}`;
     }
   }
 
+  // Parseia tool call que veio como JSON no content (Ollama/modelos locais)
+  private parseToolCallFromContent(content: string): any | null {
+    try {
+      // Extrai JSON de code blocks ou content direto
+      const jsonMatch = content.match(/```(?:json)?\s*(\{[\s\S]*?\})\s*```/) || content.match(/(\{[\s\S]*"name"[\s\S]*"arguments"[\s\S]*\})/);
+      if (!jsonMatch) return null;
+
+      const parsed = JSON.parse(jsonMatch[1]!);
+      if (parsed.name && parsed.arguments) {
+        const toolNames = this.allTools.map((t: any) => t.function.name);
+        if (toolNames.includes(parsed.name)) {
+          return {
+            type: 'function',
+            id: `call_${Date.now()}`,
+            function: {
+              name: parsed.name,
+              arguments: typeof parsed.arguments === 'string' ? parsed.arguments : JSON.stringify(parsed.arguments)
+            }
+          };
+        }
+      }
+    } catch { /* not a tool call */ }
+    return null;
+  }
+
   // Estima tokens de uma mensagem (~4 chars por token)
   private estimateTokens(msg: any): number {
     let chars = 0;
@@ -988,7 +1193,9 @@ cwd: ${process.cwd()}`;
   // Token budget: garante que o total de messages não passe do limite
   // Estratégia: comprime do mais antigo pro mais recente até caber
   private compressOldMessages() {
-    const TOKEN_BUDGET = 8000; // max ~8k tokens de mensagens (tools usam ~1.2k separado)
+    // Budget baseado no context window do modelo ativo (60% do total)
+    const ctxWindow = this.service.contextWindow;
+    const TOKEN_BUDGET = Math.min(Math.floor(ctxWindow * 0.6), 50000);
     const KEEP_RECENT = 4; // últimas 4 msgs intactas sempre
 
     // Calcula total atual
@@ -1022,21 +1229,39 @@ cwd: ${process.cwd()}`;
   }
 
   // --- Compactação ---
+  // Compactação LOCAL (sem API call) - nunca bloqueia o prompt
+  private quickCompact() {
+    const sys = this.messages[0];
+    // Extrai resumo dos últimos user messages
+    const userMsgs = this.messages.filter(m => m.role === 'user').map(m => m.content);
+    const summary = userMsgs.slice(-3).join(' | ').substring(0, 300);
+    // Mantém system + resumo + últimas 4 msgs
+    const tail = this.sanitizeMessages(this.messages.slice(-4));
+    this.messages = [sys, { role: 'system', content: `[CTX]: ${summary}` }, ...tail];
+    logger.dim('  contexto compactado');
+  }
+
+  // Compactação via API (só no /compact manual)
   private async compactHistory() {
-    logger.dim('  Compactando...');
+    logger.dim('  Compactando via API...');
+    const stopTimer = this.startLiveTimer('compacting');
     try {
       const safeMessages = this.sanitizeMessages(this.messages);
       const r = await this.service.chat([
         ...safeMessages,
         { role: 'user', content: 'Resuma em 3 frases: objetivos, arquivos alterados, estado atual.' }
       ]);
+      stopTimer();
       if (r?.content) {
         const sys = this.messages[0];
-        const tail = this.sanitizeMessages(this.messages.slice(-6));
+        const tail = this.sanitizeMessages(this.messages.slice(-4));
         this.messages = [sys, { role: 'system', content: `[CTX]: ${r.content}` }, ...tail];
-        logger.success('Contexto compactado.');
+        logger.success('Contexto compactado via API.');
       }
-    } catch { /* ok */ }
+    } catch {
+      stopTimer();
+      this.quickCompact(); // fallback local
+    }
   }
 
   // Garante que messages estão válidas para a API:

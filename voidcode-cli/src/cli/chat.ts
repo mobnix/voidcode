@@ -204,7 +204,8 @@ export class ChatLoop {
   private abortTask = false;
   private allTools: any[] = [];
   private allHandlers: Record<string, (args: any) => any> = {};
-  private readonly MAX_HISTORY_LENGTH = 50;
+  private readonly MAX_USER_MESSAGES = 50;
+  private userMessageCount = 0;
   private activeAgents: Map<string, { promise: Promise<string>; objective: string; startedAt: Date; status: string; iteration: number }> = new Map();
   private agentCounter = 0;
   private tasks: Task[] = [];
@@ -288,7 +289,10 @@ cwd: ${process.cwd()}`;
     this.showFooter();
 
     while (true) {
-      if (this.messages.length > this.MAX_HISTORY_LENGTH) this.quickCompact();
+      if (this.userMessageCount >= this.MAX_USER_MESSAGES) {
+        this.quickCompact();
+        this.userMessageCount = 0;
+      }
 
       const mode = this.planMode ? chalk.hex('#ADFF2F')('[PLAN] ') : '';
       const busy = this.processing ? chalk.hex('#008F11')('[busy] ') : '';
@@ -333,6 +337,7 @@ cwd: ${process.cwd()}`;
       }
 
       // Primeira tarefa: roda em background, prompt fica livre
+      this.userMessageCount++;
       this.processing = true;
       this.executeTaskBackground(actualInput);
     }

@@ -261,12 +261,26 @@ REGRAS:
     if (this.continueMode) {
       const last = loadLastSession();
       if (last?.messages?.length) {
-        // Mantém o system prompt atual, injeta mensagens da sessão anterior
         const oldMsgs = last.messages.filter(m => m.role !== 'system');
         this.messages.push({ role: 'system', content: `[SESSÃO RETOMADA]: ${last.summary}` });
         this.messages.push(...oldMsgs);
         const cwdShort = last.cwd.replace(process.env.HOME || '', '~');
-        logger.success(`Sessão restaurada (${oldMsgs.length} msgs, ${cwdShort})`);
+        logger.success(`Sessão restaurada (${oldMsgs.length} msgs, ${cwdShort})\n`);
+
+        // Mostra replay da conversa anterior pra o user lembrar
+        const sep = chalk.hex('#003B00')('─'.repeat(process.stdout.columns || 80));
+        console.log(sep);
+        console.log(chalk.hex('#008F11').bold('  SESSÃO ANTERIOR:\n'));
+        for (const m of oldMsgs) {
+          if (m.role === 'user') {
+            console.log(chalk.hex('#00FF41').bold('  Você > ') + chalk.hex('#00FF41')(m.content));
+          } else if (m.role === 'assistant' && m.content) {
+            const preview = m.content.length > 300 ? m.content.substring(0, 300) + '...' : m.content;
+            console.log(chalk.hex('#008F11').bold('  VOIDCODE > ') + chalk.hex('#008F11')(preview));
+          }
+          console.log();
+        }
+        console.log(sep);
       } else {
         logger.warn('Sem sessão anterior para continuar.');
       }

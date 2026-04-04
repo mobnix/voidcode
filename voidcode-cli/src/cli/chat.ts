@@ -1176,6 +1176,18 @@ cwd: ${process.cwd()}` },
             break;
           }
 
+          // 400: messages inválidas — limpa contexto e tenta de novo
+          if ((e as any).status === 400) {
+            logger.warn(`400 — limpando contexto e tentando de novo`);
+            // Remove messages de tool que podem estar mal formatadas
+            this.messages = this.messages.filter(m => m.role !== 'tool');
+            this.messages = this.messages.map(m => {
+              if (m.role === 'assistant' && m.tool_calls) return { role: 'assistant', content: m.content || '(executou tools)' };
+              return m;
+            });
+            continue;
+          }
+
           // Outros erros de stream: fallback pra non-stream
           try {
             response = await this.service.chat(this.messages, toolsToSend);

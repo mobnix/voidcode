@@ -258,12 +258,19 @@ export class LLMService {
       };
     } catch (error: any) {
       const msg = error?.message || '';
-      const status = error?.status || 0;
+      const status = error?.status || error?.code || 0;
       // Propaga 429 com marcação pro pool fazer fallback
       if (status === 429 || msg.includes('429')) {
         const err = new Error(`429 rate limit (${this._provider}/${this._model})`);
         (err as any).status = 429;
         (err as any).provider = this._provider;
+        throw err;
+      }
+      // 400: bad request — provavelmente messages com formato inválido
+      if (status === 400 || msg.includes('400')) {
+        const detail = error?.error?.message || error?.response?.data?.error?.message || msg;
+        const err = new Error(`400 bad request (${this._provider}): ${detail}`);
+        (err as any).status = 400;
         throw err;
       }
       throw new Error(`Erro na API (${this._provider}/${this._model}): ${msg}`);

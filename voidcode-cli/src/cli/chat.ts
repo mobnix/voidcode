@@ -229,33 +229,31 @@ export class ChatLoop {
     this.service = this.pool.getDefault();
     this.insaneMode = insaneMode;
 
-    // Intercepta console.log E stdout.write pra capturar output do terminal
+    // Captura output relevante do terminal (sem footer, sem escape codes)
     const self = this;
-    const origLog = console.log;
-    const origWrite = process.stdout.write.bind(process.stdout);
+    const JUNK = /\x1b[\[\(][0-9;]*[a-zA-Z]|\x1b[78]|\r/g;
+    const FOOTER_NOISE = /tokens|reqs|ESC pausa|\/auth|\/help|\/exit|providers|deepseek\/|gemini\/|openai\/|INSANE|SAFE|PLAN/i;
 
-    const captureOutput = (text: string) => {
+    const captureLog = (text: string) => {
       try {
-        const clean = text.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '').replace(/\r/g, ''); // strip ANSI + CR
+        const clean = text.replace(JUNK, '');
         for (const line of clean.split('\n')) {
-          const trimmed = line.trim();
-          if (trimmed && trimmed.length > 1 && !trimmed.match(/^─+$/)) { // ignora barras e linhas vazias
-            self.terminalLog.push(trimmed);
-            if (self.terminalLog.length > 50) self.terminalLog.shift();
-          }
+          const t = line.trim();
+          // Filtra: vazio, barras, footer, duplicata da última linha
+          if (!t || t.length < 3) continue;
+          if (/^─+$/.test(t)) continue;
+          if (FOOTER_NOISE.test(t)) continue;
+          if (self.terminalLog.length && self.terminalLog[self.terminalLog.length - 1] === t) continue;
+          self.terminalLog.push(t);
+          if (self.terminalLog.length > 50) self.terminalLog.shift();
         }
       } catch { /* ok */ }
     };
 
+    const origLog = console.log;
     console.log = (...args: any[]) => {
       origLog.apply(console, args);
-      captureOutput(args.map(a => typeof a === 'string' ? a : String(a)).join(' '));
-    };
-
-    process.stdout.write = (chunk: any, ...rest: any[]): boolean => {
-      const result = origWrite(chunk, ...rest);
-      if (typeof chunk === 'string') captureOutput(chunk);
-      return result;
+      captureLog(args.map(a => typeof a === 'string' ? a : String(a)).join(' '));
     };
 
     // Auto-save em qualquer saída (Ctrl+D, Ctrl+C, /exit, crash)

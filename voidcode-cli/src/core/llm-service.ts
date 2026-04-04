@@ -69,7 +69,7 @@ export class LLMService {
 
     try {
       const isLocal = this._provider === 'ollama';
-      const maxTokens = attempt > 0 ? 2048 : (isLocal ? 4096 : 8192);
+      const maxTokens = attempt > 0 ? 4096 : (isLocal ? 4096 : 16384);
 
       const apiCall = this.client.chat.completions.create({
         model: this._model,

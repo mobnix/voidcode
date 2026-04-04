@@ -97,15 +97,15 @@ function splitBlocks(text: string): string[] {
   return blocks;
 }
 
-// Truncate tool output
-const MAX_TOOL_OUTPUT = 3000;
+// Truncate tool output — generous para evitar re-requests
+const MAX_TOOL_OUTPUT = 8000;
 
 export function truncateToolOutput(output: string): string {
   if (output.length <= MAX_TOOL_OUTPUT) return output;
-  const head = 1500;
-  const tail = 1000;
+  const head = 5000;
+  const tail = 2000;
   return output.substring(0, head) +
-    `\n... [${output.length - head - tail} chars ocultos] ...\n` +
+    `\n... [${output.length - head - tail} chars truncados] ...\n` +
     output.substring(output.length - tail);
 }
 

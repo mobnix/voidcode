@@ -406,13 +406,10 @@ REGRAS:
     ];
 
     try {
-      const stopPlanTimer = this.startLiveTimer('planning');
-      const planResponse = await this.service.chat(planMessages);
-      stopPlanTimer();
+      const planResponse = await this.service.chatStream(planMessages);
 
       if (planResponse.content) {
-        smartOutput(planResponse.content, 'PLAN');
-
+        // Stream já mostrou o conteúdo — só perguntar
         // Pergunta se quer executar
         const confirm = await ask(chalk.hex('#ADFF2F')('  Executar este plano? (Y/n/edit) '));
 
@@ -1107,12 +1104,12 @@ REGRAS:
 
         this.messages = this.sanitizeMessages(this.messages);
         this.compressOldMessages();
-        const stopTimer = this.startLiveTimer(`thinking (${iterations}/10)`);
+
+        // Streaming: user vê resposta em tempo real (sem timer, o stream já mostra progresso)
         let response: any;
         try {
-          response = await this.service.chat(this.messages, toolsToSend);
+          response = await this.service.chatStream(this.messages, toolsToSend);
         } catch (e: any) {
-          stopTimer();
           if (this.abortTask) break;
 
           // Rate limit: cooldown adaptativo (60s, 120s, 5min, 10min)
@@ -1130,12 +1127,16 @@ REGRAS:
             }
           }
 
-          logger.error(`${e.message}`);
-          break;
+          // Fallback: se stream falhar, tenta sem stream
+          try {
+            response = await this.service.chat(this.messages, toolsToSend);
+          } catch (e2: any) {
+            logger.error(`${e2.message || e.message}`);
+            break;
+          }
         }
-        stopTimer();
 
-        // Limpa tokens especiais de modelos locais (Qwen, Llama, etc)
+        // Limpa tokens especiais de modelos locais
         if (response.content) {
           response.content = response.content.replace(/<\|im_start\|>|<\|im_end\|>|<\|endoftext\|>|<s>|<\/s>/g, '').trim();
         }
@@ -1177,7 +1178,7 @@ REGRAS:
 
         this.messages.push(response);
 
-        if (response.content) smartOutput(response.content, 'VOIDCODE');
+        // Stream já imprimiu o content na tela — não duplicar
         if (!response.tool_calls?.length) {
           if (!response.content) logger.dim('  (sem resposta)');
           break;

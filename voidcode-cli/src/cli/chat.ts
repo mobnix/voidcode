@@ -275,7 +275,8 @@ REGRAS CRÍTICAS:
 - Para servidores: run_shell_command com background:true.
 - NUNCA repita uma tool call com os mesmos argumentos.
 - ARQUIVOS GRANDES (>200 linhas): NUNCA reescreva inteiro. Use patch_file para adicionar/modificar seções específicas. Divida em várias chamadas patch_file se necessário.
-- Respostas texto devem ter no MÁXIMO 3 linhas. O output das tools fala por si.`;
+- Respostas texto devem ter no MÁXIMO 3 linhas. O output das tools fala por si.
+- NUNCA sobrescreva package.json, tsconfig.json ou .env do projeto raiz. Crie subpastas para projetos novos.`;
 
     if (noTools) {
       systemPrompt += `\nSem tools. Responda com JSON: {"name":"tool_name","arguments":{...}}`;

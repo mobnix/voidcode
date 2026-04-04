@@ -220,12 +220,30 @@ export class ChatLoop {
   private processing = false;
   private taskQueue: string[] = [];
   private continueMode = false;
+  private terminalLog: string[] = []; // últimas 50 linhas do terminal
+  private _origConsoleLog = console.log;
 
   constructor(insaneMode = false, continueMode = false) {
     this.continueMode = continueMode;
     this.pool = new LLMPool();
     this.service = this.pool.getDefault();
     this.insaneMode = insaneMode;
+
+    // Intercepta console.log pra capturar output do terminal
+    const self = this;
+    const origLog = console.log;
+    console.log = (...args: any[]) => {
+      origLog.apply(console, args);
+      try {
+        // Converte args pra string sem ANSI pra salvar limpo
+        const line = args.map(a => typeof a === 'string' ? a : String(a)).join(' ')
+          .replace(/\x1b\[[0-9;]*m/g, ''); // strip ANSI
+        if (line.trim()) {
+          self.terminalLog.push(line);
+          if (self.terminalLog.length > 50) self.terminalLog.shift();
+        }
+      } catch { /* ok */ }
+    };
 
     const modelName = process.env.LLM_MODEL || 'deepseek-chat';
     const noTools = NO_TOOLS_MODELS.has(modelName);
@@ -270,20 +288,17 @@ REGRAS CRÍTICAS:
         const cwdShort = last.cwd.replace(process.env.HOME || '', '~');
         logger.success(`Sessão restaurada (${oldMsgs.length} msgs, ${cwdShort})\n`);
 
-        // Mostra replay da conversa anterior pra o user lembrar
-        const sep = chalk.hex('#003B00')('─'.repeat(process.stdout.columns || 80));
-        console.log(sep);
-        console.log(chalk.hex('#008F11').bold('  SESSÃO ANTERIOR:\n'));
-        for (const m of oldMsgs) {
-          if (m.role === 'user') {
-            console.log(chalk.hex('#00FF41').bold('  Você > ') + chalk.hex('#00FF41')(m.content));
-          } else if (m.role === 'assistant' && m.content) {
-            const preview = m.content.length > 300 ? m.content.substring(0, 300) + '...' : m.content;
-            console.log(chalk.hex('#008F11').bold('  VOIDCODE > ') + chalk.hex('#008F11')(preview));
+        // Mostra últimas linhas do terminal pra user lembrar o que aconteceu
+        const savedLog = (last as any).terminalLog as string[] | undefined;
+        if (savedLog?.length) {
+          const sep = chalk.hex('#003B00')('─'.repeat(process.stdout.columns || 80));
+          console.log(sep);
+          console.log(chalk.hex('#008F11').bold('  HISTÓRICO DO TERMINAL:\n'));
+          for (const line of savedLog) {
+            console.log(chalk.hex('#005500')(line));
           }
-          console.log();
+          console.log(sep);
         }
-        console.log(sep);
       } else {
         logger.warn('Sem sessão anterior para continuar.');
       }
@@ -944,7 +959,11 @@ REGRAS CRÍTICAS:
       const SESSION_DIR_PATH = path.join(process.env.HOME || process.env.USERPROFILE || '~', '.voidcode');
       const LAST_FILE = path.join(SESSION_DIR_PATH, 'last-session.json');
       if (!fs.existsSync(SESSION_DIR_PATH)) fs.mkdirSync(SESSION_DIR_PATH, { recursive: true });
-      fs.writeFileSync(LAST_FILE, JSON.stringify({ summary, cwd: process.cwd(), timestamp: new Date().toISOString(), messages: context }, null, 2), { mode: 0o600 });
+      fs.writeFileSync(LAST_FILE, JSON.stringify({
+        summary, cwd: process.cwd(), timestamp: new Date().toISOString(),
+        messages: context,
+        terminalLog: this.terminalLog.slice(-50)
+      }, null, 2), { mode: 0o600 });
     } catch { /* silent */ }
   }
 

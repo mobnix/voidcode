@@ -28,10 +28,8 @@ program
 program
   .action(async (options) => {
     // Checa se tem alguma API key configurada
-    const hasKey = process.env.DEEPSEEK_API_KEY || process.env.OPENAI_API_KEY ||
-                   process.env.QWEN_API_KEY || process.env.MINIMAX_API_KEY ||
-                   process.env.GROQ_API_KEY || process.env.HF_API_KEY ||
-                   process.env.CUSTOM_API_KEY;
+    const { PROVIDERS } = await import('./core/providers.js');
+    const hasKey = PROVIDERS.some(p => process.env[p.envKey]);
 
     if (!hasKey) {
       const success = await runConfigWizard(VOIDCODE_HOME);
@@ -41,15 +39,22 @@ program
 
     splashScreen();
 
-    const provider = process.env.LLM_PROVIDER || 'deepseek';
-    const model = process.env.LLM_MODEL || 'deepseek-chat';
+    // Mostra providers conectados
+    const connected = PROVIDERS.filter(p => process.env[p.envKey]).map(p => p.name);
+    const defaultProvider = process.env.LLM_PROVIDER || 'deepseek';
+    const defaultModel = process.env.LLM_MODEL || 'deepseek-chat';
 
     if (options.insane) {
       logger.glitch('MODO INSANO ATIVADO');
     }
 
-    logger.success(`Conectado: ${provider}/${model}`);
-    logger.info('/auth trocar provider | /help comandos\n');
+    if (connected.length > 1) {
+      logger.success(`${connected.length} providers: ${connected.join(', ')}`);
+      logger.info(`Default: ${defaultProvider}/${defaultModel} | Routing: AUTO`);
+    } else {
+      logger.success(`Conectado: ${defaultProvider}/${defaultModel}`);
+    }
+    logger.info('/auth providers | /help comandos\n');
 
     const chat = new ChatLoop(options.insane);
     await chat.start();

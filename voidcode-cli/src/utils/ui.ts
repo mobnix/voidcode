@@ -15,7 +15,7 @@ export const matrixColors = {
 export const matrixGradient = gradient(['#003B00', '#008F11', '#00FF41', '#ADFF2F']);
 const voidGradient = gradient(['#00FF41', '#008F11', '#ADFF2F', '#00FF41']);
 
-// Logger minimalista - sem emojis, sem ruído
+// Logger minimalista
 export const logger = {
   info: (msg: string) => console.log(chalk.hex(matrixColors.green)(msg)),
   success: (msg: string) => console.log(chalk.hex(matrixColors.brightGreen)(msg)),
@@ -25,12 +25,12 @@ export const logger = {
   dim: (msg: string) => console.log(chalk.hex(matrixColors.dim)(msg)),
   glitch: (msg: string) => console.log(chalk.hex(matrixColors.brightGreen)(msg)),
   tool: (name: string, args: string) => {
-    const short = args.length > 100 ? args.substring(0, 100) + '...' : args;
+    const short = args.length > 80 ? args.substring(0, 80) + '...' : args;
     console.log(chalk.hex(matrixColors.dim)(`  ${name} ${short}`));
   }
 };
 
-// Progress bar
+// Progress
 export function progressBar(current: number, total: number, width = 30): string {
   const pct = Math.min(1, current / total);
   const filled = Math.round(width * pct);
@@ -43,28 +43,62 @@ export function toolProgress(current: number, total: number, name: string): void
   if (current === total) process.stdout.write('\n');
 }
 
-// Output de texto do LLM
-const COLLAPSE_THRESHOLD = 60;
+// --- Smart Output: recolhe blocos longos ---
+const COLLAPSE_AT = 5; // recolhe a partir de 5 linhas
 
 export function smartOutput(text: string, label: string = 'VOIDCODE'): void {
-  const lines = text.split('\n');
+  const prefix = chalk.hex('#00FF41').bold(`${label} > `);
 
-  if (lines.length <= COLLAPSE_THRESHOLD) {
-    console.log('\n' + chalk.hex('#00FF41').bold(`${label} > `) + text + '\n');
-    return;
+  // Divide em blocos: texto normal, code blocks, listas
+  const blocks = splitBlocks(text);
+  let output = '\n' + prefix;
+
+  for (const block of blocks) {
+    const lines = block.split('\n');
+    if (lines.length <= COLLAPSE_AT) {
+      output += block;
+    } else {
+      // Recolhe: mostra 3 primeiras + contagem + 2 últimas
+      const head = lines.slice(0, 3).join('\n');
+      const tail = lines.slice(-2).join('\n');
+      const hidden = lines.length - 5;
+      output += head + '\n';
+      output += chalk.hex(matrixColors.dim)(`  ── ${hidden} linhas recolhidas ──`) + '\n';
+      output += tail;
+    }
   }
 
-  const head = lines.slice(0, 25);
-  const tail = lines.slice(-25);
-  const hidden = lines.length - 50;
-
-  console.log('\n' + chalk.hex('#00FF41').bold(`${label} >`));
-  console.log(head.join('\n'));
-  console.log(chalk.hex(matrixColors.dim)(`  ... ${hidden} linhas ocultas ...`));
-  console.log(tail.join('\n') + '\n');
+  console.log(output + '\n');
 }
 
-const MAX_TOOL_OUTPUT = 3000; // 3k chars max por tool result (~750 tokens)
+// Separa texto em blocos por code fences e seções
+function splitBlocks(text: string): string[] {
+  const blocks: string[] = [];
+  let current = '';
+  let inCode = false;
+
+  for (const line of text.split('\n')) {
+    if (line.startsWith('```')) {
+      if (inCode) {
+        current += line + '\n';
+        blocks.push(current);
+        current = '';
+        inCode = false;
+      } else {
+        if (current) blocks.push(current);
+        current = line + '\n';
+        inCode = true;
+      }
+    } else {
+      current += line + '\n';
+    }
+  }
+  if (current) blocks.push(current);
+  return blocks;
+}
+
+// Truncate tool output
+const MAX_TOOL_OUTPUT = 3000;
 
 export function truncateToolOutput(output: string): string {
   if (output.length <= MAX_TOOL_OUTPUT) return output;
@@ -75,7 +109,7 @@ export function truncateToolOutput(output: string): string {
     output.substring(output.length - tail);
 }
 
-// Footer fixo nas 2 últimas linhas via scroll region
+// --- Footer ---
 const FOOTER_LINES = 2;
 let footerActive = false;
 let lastOpts: any = null;
@@ -89,8 +123,9 @@ export function initFixedFooter() {
 
 function setupScrollRegion() {
   const rows = process.stdout.rows || 24;
-  // Scroll region: linhas 1 até (rows - 2). Footer fica fora.
+  process.stdout.write('\x1b7');                         // save cursor
   process.stdout.write(`\x1b[1;${rows - FOOTER_LINES}r`);
+  process.stdout.write('\x1b8');                         // restore cursor
   if (lastOpts) paintFooter(lastOpts);
 }
 
@@ -98,28 +133,26 @@ export function destroyFixedFooter() {
   if (!process.stdout.isTTY) return;
   footerActive = false;
   const rows = process.stdout.rows || 24;
-  process.stdout.write(`\x1b[1;${rows}r`); // reset scroll region
+  process.stdout.write(`\x1b[1;${rows}r`);
   process.stdout.write(`\x1b[${rows};1H\n`);
 }
 
 function paintFooter(opts: any) {
   if (!process.stdout.isTTY) return;
   const rows = process.stdout.rows || 24;
-  const cols = process.stdout.columns || 80;
 
+  const provCount = opts.activeProviders ? chalk.hex(matrixColors.dim)(`${opts.activeProviders} providers`) : '';
   const parts = [
     chalk.hex(matrixColors.green)(opts.model),
     chalk.hex(matrixColors.brightGreen)(opts.mode),
+    provCount,
     chalk.hex(matrixColors.dim)(`msgs:${opts.messagesCount}`),
-    chalk.hex(matrixColors.dim)(`in:${fmtT(opts.tokens.promptTokens)}`),
-    chalk.hex(matrixColors.dim)(`out:${fmtT(opts.tokens.completionTokens)}`),
     chalk.hex(matrixColors.dim)(`total:${fmtT(opts.tokens.totalTokens)}`),
     chalk.hex(matrixColors.dim)(`reqs:${opts.requests}`),
-  ].join(chalk.hex(matrixColors.darkGreen)(' | '));
+  ].filter(Boolean).join(chalk.hex(matrixColors.darkGreen)(' | '));
 
   const hints = chalk.hex(matrixColors.dim)(`${shortenPath(opts.cwd)}  /menu /help /plan /exit`);
 
-  // Salva cursor, pinta nas 2 últimas linhas, restaura cursor
   process.stdout.write('\x1b7');
   process.stdout.write(`\x1b[${rows - 1};1H\x1b[2K ${parts}`);
   process.stdout.write(`\x1b[${rows};1H\x1b[2K ${hints}`);
@@ -133,12 +166,12 @@ export function renderFooter(opts: {
   requests: number;
   cwd: string;
   messagesCount: number;
+  activeProviders?: number;
 }): void {
   lastOpts = opts;
   if (footerActive) {
     paintFooter(opts);
   } else {
-    // Fallback inline se não é TTY
     const cols = process.stdout.columns || 80;
     console.log(chalk.hex(matrixColors.darkGreen)('─'.repeat(cols)));
     const parts = [
@@ -174,10 +207,8 @@ export const splashScreen = () => {
 
   console.log(voidGradient(logo));
   console.log();
-
   const cols = process.stdout.columns || 80;
   const line = chalk.hex(matrixColors.darkGreen)('─'.repeat(cols));
-
   console.log(line);
   console.log(chalk.hex(matrixColors.dim)(' Multi-LLM Agentic CLI v2.0                                   by Mobnix'));
   console.log(line);

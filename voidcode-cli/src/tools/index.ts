@@ -315,11 +315,11 @@ export const toolHandlers: Record<string, (args: any) => any> = {
   },
 
   // --- Smart File ---
-  read_file_lines: ({ path: filePath, start, end }) => {
+  read_file_lines: ({ path: filePath, start, end, start_line, end_line }) => {
     try {
       const lines = fs.readFileSync(safePath(filePath), 'utf-8').split('\n');
-      const s = Math.max(1, start) - 1;
-      const e = Math.min(lines.length, end);
+      const s = Math.max(1, start || start_line || 1) - 1;
+      const e = Math.min(lines.length, end || end_line || lines.length);
       return lines.slice(s, e).map((line, i) => `${s + i + 1}: ${line}`).join('\n');
     } catch (e: any) {
       return `Erro: ${e.message}`;

@@ -3,3 +3,10 @@ dist/
 .env
 .DS_Store
 *.log
+
+# TypeScript build artifacts
+*.d.ts
+*.d.ts.map
+*.js.map
+voidcode-cli/src/**/*.js
+voidcode-cli/public/

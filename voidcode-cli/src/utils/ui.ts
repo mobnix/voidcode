@@ -109,8 +109,8 @@ export function truncateToolOutput(output: string): string {
     output.substring(output.length - tail);
 }
 
-// --- Footer ---
-const FOOTER_LINES = 2;
+// --- Fixed Footer (3 linhas: separador + stats + hints) ---
+const FOOTER_LINES = 3;
 let footerActive = false;
 let lastOpts: any = null;
 
@@ -123,9 +123,9 @@ export function initFixedFooter() {
 
 function setupScrollRegion() {
   const rows = process.stdout.rows || 24;
-  process.stdout.write('\x1b7');                         // save cursor
+  process.stdout.write('\x1b7');
   process.stdout.write(`\x1b[1;${rows - FOOTER_LINES}r`);
-  process.stdout.write('\x1b8');                         // restore cursor
+  process.stdout.write('\x1b8');
   if (lastOpts) paintFooter(lastOpts);
 }
 
@@ -140,20 +140,28 @@ export function destroyFixedFooter() {
 function paintFooter(opts: any) {
   if (!process.stdout.isTTY) return;
   const rows = process.stdout.rows || 24;
+  const cols = process.stdout.columns || 80;
 
-  const provCount = opts.activeProviders ? chalk.hex(matrixColors.dim)(`${opts.activeProviders} providers`) : '';
+  // Linha 1: barra separadora verde
+  const sep = chalk.hex(matrixColors.darkGreen)('─'.repeat(cols));
+
+  // Linha 2: stats
+  const provCount = opts.activeProviders && opts.activeProviders > 1 ? chalk.hex(matrixColors.dim)(`${opts.activeProviders}x`) : '';
   const parts = [
+    provCount,
     chalk.hex(matrixColors.green)(opts.model),
     chalk.hex(matrixColors.brightGreen)(opts.mode),
-    provCount,
-    chalk.hex(matrixColors.dim)(`msgs:${opts.messagesCount}`),
-    chalk.hex(matrixColors.dim)(`total:${fmtT(opts.tokens.totalTokens)}`),
-    chalk.hex(matrixColors.dim)(`reqs:${opts.requests}`),
-  ].filter(Boolean).join(chalk.hex(matrixColors.darkGreen)(' | '));
+    chalk.hex(matrixColors.dim)(`${opts.messagesCount} msgs`),
+    chalk.hex(matrixColors.dim)(`${fmtT(opts.tokens.totalTokens)} tokens`),
+    chalk.hex(matrixColors.dim)(`${opts.requests} reqs`),
+  ].filter(Boolean).join(chalk.hex(matrixColors.darkGreen)(' · '));
 
-  const hints = chalk.hex(matrixColors.dim)(`${shortenPath(opts.cwd)}  /menu /help /plan /exit`);
+  // Linha 3: cwd + atalhos
+  const cwdStr = shortenPath(opts.cwd);
+  const hints = chalk.hex(matrixColors.dim)(`${cwdStr}  ESC pausa · /auth · /help · /exit`);
 
   process.stdout.write('\x1b7');
+  process.stdout.write(`\x1b[${rows - 2};1H\x1b[2K${sep}`);
   process.stdout.write(`\x1b[${rows - 1};1H\x1b[2K ${parts}`);
   process.stdout.write(`\x1b[${rows};1H\x1b[2K ${hints}`);
   process.stdout.write('\x1b8');
@@ -177,8 +185,8 @@ export function renderFooter(opts: {
     const parts = [
       chalk.hex(matrixColors.green)(opts.model),
       chalk.hex(matrixColors.brightGreen)(opts.mode),
-      chalk.hex(matrixColors.dim)(`msgs:${opts.messagesCount} total:${fmtT(opts.tokens.totalTokens)}`),
-    ].join(chalk.hex(matrixColors.darkGreen)(' | '));
+      chalk.hex(matrixColors.dim)(`${opts.messagesCount} msgs · ${fmtT(opts.tokens.totalTokens)} tokens`),
+    ].join(chalk.hex(matrixColors.darkGreen)(' · '));
     console.log(` ${parts}`);
   }
 }

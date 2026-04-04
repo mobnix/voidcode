@@ -1112,7 +1112,7 @@ REGRAS:
         } catch (e: any) {
           if (this.abortTask) break;
 
-          // Rate limit: cooldown adaptativo (60s, 120s, 5min, 10min)
+          // Rate limit: cooldown adaptativo + fallback pra outro provider
           if ((e as any).status === 429) {
             const failedProvider = this.service.provider;
             const hitCount = this.pool.markRateLimited(failedProvider);
@@ -1121,13 +1121,15 @@ REGRAS:
             const available = this.pool.getAvailable().filter(a => a.providerId !== failedProvider);
             if (available.length > 0) {
               const fallback = this.pool.get(available[0]!.providerId)!;
-              logger.warn(`429 ${failedProvider} (${cooldownStr} cooldown, hit #${hitCount}) → ${fallback.provider}/${fallback.modelName}`);
+              logger.warn(`429 ${failedProvider} (${cooldownStr} cooldown) → ${fallback.provider}/${fallback.modelName}`);
               this.service = fallback;
-              continue;
+              continue; // retry com outro provider
             }
+            logger.error(`429 ${failedProvider} — sem providers disponíveis`);
+            break;
           }
 
-          // Fallback: se stream falhar, tenta sem stream
+          // Outros erros de stream: fallback pra non-stream
           try {
             response = await this.service.chat(this.messages, toolsToSend);
           } catch (e2: any) {

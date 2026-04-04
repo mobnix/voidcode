@@ -339,9 +339,12 @@ REGRAS CRÍTICAS:
       const busy = this.processing ? chalk.hex('#008F11')('[busy] ') : '';
       const cols = process.stdout.columns || 80;
       const bar = chalk.hex('#003B00')('─'.repeat(cols));
+      // Título do projeto entre as barras
+      const projectName = path.basename(process.cwd());
       process.stdout.write(bar + '\n');
-      const userInput = await ask(busy + mode + chalk.hex('#00FF41')('> '));
+      process.stdout.write(chalk.hex('#008F11')(` ${projectName}`) + '\n');
       process.stdout.write(bar + '\n');
+      const userInput = await ask(busy + mode + chalk.hex('#00FF41')(' > '));
 
       if (!userInput) continue;
       if (userInput.toLowerCase() === '/exit' || userInput.toLowerCase() === 'exit') {

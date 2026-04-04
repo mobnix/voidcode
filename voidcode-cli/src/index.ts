@@ -23,7 +23,8 @@ program
   .name('voidcode')
   .description('Multi-LLM Agentic CLI with Matrix Aesthetics')
   .version('2.0.0')
-  .option('-i, --insane', 'Modo Insano: Executa comandos sem pedir confirmação', false);
+  .option('-i, --insane', 'Modo Insano: Executa comandos sem pedir confirmação', false)
+  .option('-c, --continue', 'Continua a última sessão automaticamente', false);
 
 program
   .action(async (options) => {
@@ -47,6 +48,9 @@ program
     if (options.insane) {
       logger.glitch('MODO INSANO ATIVADO');
     }
+    if (options.continue) {
+      logger.info('Retomando última sessão...');
+    }
 
     if (connected.length > 1) {
       logger.success(`${connected.length} providers: ${connected.join(', ')}`);
@@ -56,7 +60,7 @@ program
     }
     logger.info('/auth providers | /help comandos\n');
 
-    const chat = new ChatLoop(options.insane);
+    const chat = new ChatLoop(options.insane, options.continue);
     await chat.start();
   });
 

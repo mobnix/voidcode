@@ -229,20 +229,33 @@ export class ChatLoop {
     this.service = this.pool.getDefault();
     this.insaneMode = insaneMode;
 
-    // Intercepta console.log pra capturar output do terminal
+    // Intercepta console.log E stdout.write pra capturar output do terminal
     const self = this;
     const origLog = console.log;
-    console.log = (...args: any[]) => {
-      origLog.apply(console, args);
+    const origWrite = process.stdout.write.bind(process.stdout);
+
+    const captureOutput = (text: string) => {
       try {
-        // Converte args pra string sem ANSI pra salvar limpo
-        const line = args.map(a => typeof a === 'string' ? a : String(a)).join(' ')
-          .replace(/\x1b\[[0-9;]*m/g, ''); // strip ANSI
-        if (line.trim()) {
-          self.terminalLog.push(line);
-          if (self.terminalLog.length > 50) self.terminalLog.shift();
+        const clean = text.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '').replace(/\r/g, ''); // strip ANSI + CR
+        for (const line of clean.split('\n')) {
+          const trimmed = line.trim();
+          if (trimmed && trimmed.length > 1 && !trimmed.match(/^─+$/)) { // ignora barras e linhas vazias
+            self.terminalLog.push(trimmed);
+            if (self.terminalLog.length > 50) self.terminalLog.shift();
+          }
         }
       } catch { /* ok */ }
+    };
+
+    console.log = (...args: any[]) => {
+      origLog.apply(console, args);
+      captureOutput(args.map(a => typeof a === 'string' ? a : String(a)).join(' '));
+    };
+
+    process.stdout.write = (chunk: any, ...rest: any[]): boolean => {
+      const result = origWrite(chunk, ...rest);
+      if (typeof chunk === 'string') captureOutput(chunk);
+      return result;
     };
 
     // Auto-save em qualquer saída (Ctrl+D, Ctrl+C, /exit, crash)
@@ -263,7 +276,7 @@ REGRAS CRÍTICAS:
 - Para editar parte de arquivo: read_file_lines → patch_file.
 - Para servidores: run_shell_command com background:true.
 - NUNCA repita uma tool call com os mesmos argumentos.
-- Se o arquivo é grande e precisa reescrever inteiro, use write_file de uma vez.
+- ARQUIVOS GRANDES (>200 linhas): NUNCA reescreva inteiro. Use patch_file para adicionar/modificar seções específicas. Divida em várias chamadas patch_file se necessário.
 - Respostas texto devem ter no MÁXIMO 3 linhas. O output das tools fala por si.`;
 
     if (noTools) {

@@ -351,12 +351,13 @@ REGRAS CRÍTICAS:
       const mode = this.planMode ? chalk.hex('#ADFF2F')('[PLAN] ') : '';
       const busy = this.processing ? chalk.hex('#008F11')('[busy] ') : '';
       const cols = process.stdout.columns || 80;
-      const bar = chalk.hex('#003B00')('─'.repeat(cols));
-      // Título do projeto entre as barras
       const projectName = path.basename(process.cwd());
-      process.stdout.write(bar + '\n');
-      process.stdout.write(chalk.hex('#008F11')(` ${projectName}`) + '\n');
-      process.stdout.write(bar + '\n');
+      // Barra com título do projeto embutido (1 linha só, não conflita com footer)
+      const title = ` ${projectName} `;
+      const remaining = Math.max(0, cols - title.length);
+      const leftBar = Math.floor(remaining / 2);
+      const rightBar = remaining - leftBar;
+      process.stdout.write(chalk.hex('#003B00')('─'.repeat(leftBar)) + chalk.hex('#008F11')(title) + chalk.hex('#003B00')('─'.repeat(rightBar)) + '\n');
       const userInput = await ask(busy + mode + chalk.hex('#00FF41')(' > '));
 
       if (!userInput) continue;

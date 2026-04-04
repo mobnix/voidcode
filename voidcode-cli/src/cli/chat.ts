@@ -1056,8 +1056,8 @@ REGRAS:
       const sec = Math.round((Date.now() - start) / 1000);
       const tokens = this.pool.aggregatedUsage.totalTokens;
       process.stdout.write(`\r${chalk.hex('#005500')(`  ${label} ${sec}s | ${tokens > 1000 ? (tokens/1000).toFixed(1)+'k' : tokens} tokens`)}`);
-      // Watchdog: se passou de 100s, aborta
-      if (sec > 100 && !this.abortTask) {
+      // Watchdog: se passou de 150s, aborta (API timeout é 120s)
+      if (sec > 150 && !this.abortTask) {
         stopped = true;
         clearInterval(interval);
         process.stdout.write('\r\x1b[2K');

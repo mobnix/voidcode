@@ -64,7 +64,7 @@ export class LLMService {
   }
 
   private async _chatWithRetry(messages: any[], tools: any[] | undefined, attempt: number): Promise<any> {
-    const TIMEOUT = 90_000;
+    const TIMEOUT = 120_000; // 2min — tarefas pesadas precisam de tempo
     this._abortController = new AbortController();
 
     try {

@@ -348,17 +348,8 @@ REGRAS CRÍTICAS:
 
       const mode = this.planMode ? chalk.hex('#ADFF2F')('[PLAN] ') : '';
       const busy = this.processing ? chalk.hex('#008F11')('[busy] ') : '';
-      const cols = process.stdout.columns || 80;
-      const projectName = path.basename(process.cwd());
-      // Barra com título do projeto embutido (1 linha só, não conflita com footer)
-      const title = ` ${projectName} `;
-      const remaining = Math.max(0, cols - title.length);
-      const leftBar = Math.floor(remaining / 2);
-      const rightBar = remaining - leftBar;
-      process.stdout.write(chalk.hex('#003B00')('─'.repeat(leftBar)) + chalk.hex('#008F11')(title) + chalk.hex('#003B00')('─'.repeat(rightBar)) + '\n');
-      this.showFooter(); // repinta footer pra garantir que prompt fica acima
-      const userInput = await ask(busy + mode + chalk.hex('#00FF41')(' > '));
       this.showFooter();
+      const userInput = await ask(busy + mode + chalk.hex('#00FF41')(' > '));
 
       if (!userInput) continue;
       if (userInput.toLowerCase() === '/exit' || userInput.toLowerCase() === 'exit') {
@@ -963,7 +954,8 @@ REGRAS CRÍTICAS:
       requests: this.pool.totalRequests,
       cwd: process.cwd(),
       messagesCount: this.messages.length,
-      activeProviders: this.pool.activeCount
+      activeProviders: this.pool.activeCount,
+      projectName: path.basename(process.cwd())
     });
   }
 

@@ -1093,7 +1093,7 @@ REGRAS:
 
         this.messages = this.sanitizeMessages(this.messages);
         this.compressOldMessages();
-        const stopTimer = this.startLiveTimer(`thinking (${iterations}/25)`);
+        const stopTimer = this.startLiveTimer(`thinking (${iterations}/10)`);
         let response: any;
         try {
           response = await this.service.chat(this.messages, toolsToSend);
@@ -1101,15 +1101,16 @@ REGRAS:
           stopTimer();
           if (this.abortTask) break;
 
-          // Rate limit: tenta fallback pra outro provider
-          if ((e as any).status === 429 && this.pool.activeCount > 1) {
+          // Rate limit: marca cooldown 60s e tenta fallback
+          if ((e as any).status === 429) {
             const failedProvider = this.service.provider;
+            this.pool.markRateLimited(failedProvider);
             const available = this.pool.getAvailable().filter(a => a.providerId !== failedProvider);
             if (available.length > 0) {
               const fallback = this.pool.get(available[0]!.providerId)!;
-              logger.warn(`429 ${failedProvider} → fallback ${fallback.provider}/${fallback.modelName}`);
+              logger.warn(`429 ${failedProvider} (60s cooldown) → ${fallback.provider}/${fallback.modelName}`);
               this.service = fallback;
-              continue; // retry com outro provider
+              continue;
             }
           }
 

@@ -245,6 +245,9 @@ export class ChatLoop {
       } catch { /* ok */ }
     };
 
+    // Auto-save em qualquer saída (Ctrl+D, Ctrl+C, /exit, crash)
+    process.on('exit', () => { this.autoSaveSession(); });
+
     const modelName = process.env.LLM_MODEL || 'deepseek-chat';
     const noTools = NO_TOOLS_MODELS.has(modelName);
 

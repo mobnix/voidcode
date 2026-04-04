@@ -1115,14 +1115,16 @@ REGRAS:
           stopTimer();
           if (this.abortTask) break;
 
-          // Rate limit: marca cooldown 60s e tenta fallback
+          // Rate limit: cooldown adaptativo (60s, 120s, 5min, 10min)
           if ((e as any).status === 429) {
             const failedProvider = this.service.provider;
-            this.pool.markRateLimited(failedProvider);
+            const hitCount = this.pool.markRateLimited(failedProvider);
+            const cooldowns = ['60s', '2min', '5min', '10min'];
+            const cooldownStr = cooldowns[Math.min(hitCount - 1, cooldowns.length - 1)];
             const available = this.pool.getAvailable().filter(a => a.providerId !== failedProvider);
             if (available.length > 0) {
               const fallback = this.pool.get(available[0]!.providerId)!;
-              logger.warn(`429 ${failedProvider} (60s cooldown) → ${fallback.provider}/${fallback.modelName}`);
+              logger.warn(`429 ${failedProvider} (${cooldownStr} cooldown, hit #${hitCount}) → ${fallback.provider}/${fallback.modelName}`);
               this.service = fallback;
               continue;
             }

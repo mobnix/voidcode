@@ -206,8 +206,17 @@ export class LLMService {
         content: content || null,
         tool_calls: toolCalls.length > 0 ? toolCalls : undefined
       };
-    } catch (error) {
-      throw new Error(`Erro na API (${this._provider}/${this._model}): ${(error as any).message}`);
+    } catch (error: any) {
+      const msg = error?.message || '';
+      const status = error?.status || 0;
+      // Propaga 429 com marcação pro pool fazer fallback
+      if (status === 429 || msg.includes('429')) {
+        const err = new Error(`429 rate limit (${this._provider}/${this._model})`);
+        (err as any).status = 429;
+        (err as any).provider = this._provider;
+        throw err;
+      }
+      throw new Error(`Erro na API (${this._provider}/${this._model}): ${msg}`);
     }
   }
 }

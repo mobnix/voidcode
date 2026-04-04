@@ -7,7 +7,7 @@ import { LLMService } from '../core/llm-service.js';
 import { LLMPool } from '../core/pool.js';
 import { detectProviderOverride, stripProviderOverride } from '../core/router.js';
 import { PROVIDERS, NO_TOOLS_MODELS } from '../core/providers.js';
-import { logger, smartOutput, truncateToolOutput, renderFooter, initFixedFooter, destroyFixedFooter, toolProgress } from '../utils/ui.js';
+import { logger, smartOutput, truncateToolOutput, renderFooter, initFixedFooter, destroyFixedFooter, moveCursorToInput, toolProgress } from '../utils/ui.js';
 import { tools, toolHandlers, getToolSubset } from '../tools/index.js';
 import { loadSkills } from '../skills/index.js';
 import { safeJSONParse } from '../utils/json.js';
@@ -349,6 +349,7 @@ REGRAS CRÍTICAS:
       const mode = this.planMode ? chalk.hex('#ADFF2F')('[PLAN] ') : '';
       const busy = this.processing ? chalk.hex('#008F11')('[busy] ') : '';
       this.showFooter();
+      moveCursorToInput();
       const userInput = await ask(busy + mode + chalk.hex('#00FF41')(' > '));
 
       if (!userInput) continue;

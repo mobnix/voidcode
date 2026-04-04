@@ -354,6 +354,8 @@ cwd: ${process.cwd()}`;
         logger.error(`Erro: ${e.message}`);
       } finally {
         this.processing = false;
+        // Auto-save contexto pra --continue funcionar mesmo sem /exit
+        this.autoSaveSession();
         logger.dim('  pronto');
         this.showFooter();
         // Processa fila
@@ -906,6 +908,24 @@ cwd: ${process.cwd()}`;
     });
   }
 
+  // Auto-save silencioso a cada tarefa (pra --continue funcionar sem /exit)
+  private autoSaveSession() {
+    try {
+      if (this.messages.length < 3) return;
+      const userMsgs = this.messages.filter(m => m.role === 'user').map(m => m.content).slice(-3);
+      const summary = userMsgs.join(' | ').substring(0, 500);
+      const context: any[] = [];
+      const relevant = this.messages.filter(m => m.role === 'user' || (m.role === 'assistant' && m.content && !m.tool_calls));
+      for (const m of relevant.slice(-6)) {
+        context.push({ role: m.role, content: (m.content || '').substring(0, 500) });
+      }
+      const SESSION_DIR_PATH = path.join(process.env.HOME || process.env.USERPROFILE || '~', '.voidcode');
+      const LAST_FILE = path.join(SESSION_DIR_PATH, 'last-session.json');
+      if (!fs.existsSync(SESSION_DIR_PATH)) fs.mkdirSync(SESSION_DIR_PATH, { recursive: true });
+      fs.writeFileSync(LAST_FILE, JSON.stringify({ summary, cwd: process.cwd(), timestamp: new Date().toISOString(), messages: context }, null, 2), { mode: 0o600 });
+    } catch { /* silent */ }
+  }
+
   private async saveAndExit() {
     try {
       if (this.messages.length > 3) {
@@ -1105,7 +1125,7 @@ cwd: ${process.cwd()}`;
           const repeatCount = this._callHistory.filter(s => s === callSig).length;
           this._callHistory.push(callSig);
 
-          if (repeatCount >= 1) {
+          if (repeatCount >= 2) {
             logger.warn('Loop detectado. Forçando resposta.');
             // NÃO push response com tool_calls (causaria erro 400)
             // Injeta instrução e pede resposta texto

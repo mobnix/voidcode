@@ -56,8 +56,7 @@ function getRL(): readline.Interface {
       tabSize: 2
     } as any); // history option exists in Node 18+ but not in types
     rl.on('SIGINT', () => {
-      console.log(chalk.hex('#008F11')('\n  (Ctrl+C) Use /exit para sair.'));
-      rl?.prompt();
+      // Não interfere quando processResponse tem seu próprio SIGINT handler
     });
     rl.on('close', () => {
       ctrlDCount++;
@@ -1058,13 +1057,13 @@ cwd: ${process.cwd()}`;
   private async processResponse() {
     const sigintHandler = () => {
       this.abortTask = true;
-      this.pool.abortAll();
-      logger.warn('\nAbortado.');
+      this.service.abort();
+      logger.warn('\n  Pausado. (contexto mantido)');
     };
     process.on('SIGINT', sigintHandler);
 
+    let iterations = 0;
     try {
-      let iterations = 0;
       this.consecutiveErrors = 0;
 
       const lastUserMsg = [...this.messages].reverse().find(m => m.role === 'user');
@@ -1221,7 +1220,25 @@ cwd: ${process.cwd()}`;
     } finally {
       process.removeListener('SIGINT', sigintHandler);
       if (this.abortTask) {
-        logger.dim('  tarefa cancelada');
+        // Injeta resumo do que estava fazendo para o próximo prompt ter contexto
+        const lastAssistant = [...this.messages].reverse().find(m => m.role === 'assistant' && m.content);
+        const lastUser = [...this.messages].reverse().find(m => m.role === 'user');
+        const toolsUsed = this.messages
+          .filter(m => m.role === 'assistant' && m.tool_calls)
+          .flatMap(m => m.tool_calls.map((tc: any) => tc.function.name));
+        const uniqueTools = [...new Set(toolsUsed)].slice(-5);
+
+        const pauseCtx = [
+          lastUser?.content ? `Tarefa: ${lastUser.content.substring(0, 200)}` : '',
+          uniqueTools.length ? `Tools usadas: ${uniqueTools.join(', ')}` : '',
+          lastAssistant?.content ? `Último progresso: ${lastAssistant.content.substring(0, 300)}` : '',
+          `Iterações: ${iterations}, Status: PAUSADO pelo usuário`
+        ].filter(Boolean).join('\n');
+
+        this.messages.push({
+          role: 'system',
+          content: `[TAREFA PAUSADA - Ctrl+C]\n${pauseCtx}\nO usuário pode dar novo comando ou pedir para continuar esta tarefa.`
+        });
       }
       this.abortTask = false;
     }

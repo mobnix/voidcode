@@ -113,15 +113,35 @@ interface Task { id: number; text: string; status: 'pending' | 'done'; }
 const SESSION_DIR = path.join(process.env.HOME || process.env.USERPROFILE || '~', '.voidcode');
 const SESSIONS_FILE = path.join(SESSION_DIR, 'sessions.json');
 
-interface SessionEntry { summary: string; cwd: string; timestamp: string; }
+interface SessionEntry { summary: string; cwd: string; timestamp: string; messages?: any[]; }
 
-function saveSession(summary: string, cwd: string) {
+const LAST_SESSION_FILE = path.join(SESSION_DIR, 'last-session.json');
+
+function saveSession(summary: string, cwd: string, messages?: any[]) {
   try {
     if (!fs.existsSync(SESSION_DIR)) fs.mkdirSync(SESSION_DIR, { recursive: true });
     const sessions = loadAllSessions();
     sessions.unshift({ summary, cwd, timestamp: new Date().toISOString() });
     fs.writeFileSync(SESSIONS_FILE, JSON.stringify(sessions.slice(0, 3), null, 2));
+
+    // Salva contexto leve da última sessão para --continue
+    // Só últimas 3 interações user/assistant (sem tool calls, sem system)
+    if (messages && messages.length > 0) {
+      const context: any[] = [];
+      const relevant = messages.filter(m => m.role === 'user' || (m.role === 'assistant' && m.content && !m.tool_calls));
+      for (const m of relevant.slice(-6)) { // ~3 pares user/assistant
+        context.push({ role: m.role, content: (m.content || '').substring(0, 500) });
+      }
+      fs.writeFileSync(LAST_SESSION_FILE, JSON.stringify({ summary, cwd, timestamp: new Date().toISOString(), messages: context }, null, 2), { mode: 0o600 });
+    }
   } catch { /* ok */ }
+}
+
+function loadLastSession(): SessionEntry | null {
+  try {
+    if (!fs.existsSync(LAST_SESSION_FILE)) return null;
+    return JSON.parse(fs.readFileSync(LAST_SESSION_FILE, 'utf-8'));
+  } catch { return null; }
 }
 
 function loadAllSessions(): SessionEntry[] {
@@ -196,8 +216,10 @@ export class ChatLoop {
   private telegramBot: TelegramBridge | null = null;
   private processing = false;
   private taskQueue: string[] = [];
+  private continueMode = false;
 
-  constructor(insaneMode = false) {
+  constructor(insaneMode = false, continueMode = false) {
+    this.continueMode = continueMode;
     this.pool = new LLMPool();
     this.service = this.pool.getDefault();
     this.insaneMode = insaneMode;
@@ -230,20 +252,35 @@ cwd: ${process.cwd()}`;
     // Memória NÃO é injetada no prompt (gasta muitos tokens).
     // O LLM acessa via tool memory_read quando precisar.
 
-    const sessions = loadAllSessions();
-    if (sessions.length > 0) {
-      console.log(chalk.hex('#00FF41')('\n  Sessões anteriores:'));
-      sessions.forEach((s, i) => console.log(formatSessionForDisplay(s, i)));
-      console.log(`  ${chalk.hex('#008F11')('0)')} ${chalk.hex('#005500')('Nova sessão')}\n`);
-      const choice = await ask(chalk.hex('#008F11')('Retomar? (0/1/2/3): '));
-      const idx = parseInt(choice) - 1;
-      if (idx >= 0 && idx < sessions.length) {
-        const s = sessions[idx]!;
-        this.messages.push({
-          role: 'system',
-          content: `[SESSÃO RETOMADA]: Trabalhando em: ${s.summary}`
-        });
-        logger.success(`Sessão ${idx + 1} restaurada.`);
+    // --continue: restaura conversa completa da última sessão
+    if (this.continueMode) {
+      const last = loadLastSession();
+      if (last?.messages?.length) {
+        // Mantém o system prompt atual, injeta mensagens da sessão anterior
+        const oldMsgs = last.messages.filter(m => m.role !== 'system');
+        this.messages.push({ role: 'system', content: `[SESSÃO RETOMADA]: ${last.summary}` });
+        this.messages.push(...oldMsgs);
+        const cwdShort = last.cwd.replace(process.env.HOME || '', '~');
+        logger.success(`Sessão restaurada (${oldMsgs.length} msgs, ${cwdShort})`);
+      } else {
+        logger.warn('Sem sessão anterior para continuar.');
+      }
+    } else {
+      const sessions = loadAllSessions();
+      if (sessions.length > 0) {
+        console.log(chalk.hex('#00FF41')('\n  Sessões anteriores:'));
+        sessions.forEach((s, i) => console.log(formatSessionForDisplay(s, i)));
+        console.log(`  ${chalk.hex('#008F11')('0)')} ${chalk.hex('#005500')('Nova sessão')}\n`);
+        const choice = await ask(chalk.hex('#008F11')('Retomar? (0/1/2/3): '));
+        const idx = parseInt(choice) - 1;
+        if (idx >= 0 && idx < sessions.length) {
+          const s = sessions[idx]!;
+          this.messages.push({
+            role: 'system',
+            content: `[SESSÃO RETOMADA]: Trabalhando em: ${s.summary}`
+          });
+          logger.success(`Sessão ${idx + 1} restaurada.`);
+        }
       }
     }
 
@@ -873,8 +910,8 @@ cwd: ${process.cwd()}`;
     try {
       if (this.messages.length > 3) {
         const userMsgs = this.messages.filter(m => m.role === 'user').map(m => m.content).slice(-5);
-        saveSession(userMsgs.join(' | ').substring(0, 500), process.cwd());
-        logger.dim('  Sessão salva.');
+        saveSession(userMsgs.join(' | ').substring(0, 500), process.cwd(), this.messages);
+        logger.dim('  Sessão salva. Use --continue para retomar.');
       }
     } catch { /* ok */ }
     destroyFixedFooter();

@@ -68,8 +68,14 @@ export class LLMService {
     this._abortController = new AbortController();
 
     try {
-      const isLocal = this._provider === 'ollama';
-      const maxTokens = attempt > 0 ? 4096 : (isLocal ? 4096 : 16384);
+      // max_tokens por provider (DeepSeek max 8192, Gemini/OpenAI 16384)
+      const MAX_TOKENS_MAP: Record<string, number> = {
+        ollama: 4096, deepseek: 8192, groq: 8192, huggingface: 4096,
+        qwen: 8192, minimax: 8192,
+        openai: 16384, gemini: 16384,
+      };
+      const providerMax = MAX_TOKENS_MAP[this._provider] || 8192;
+      const maxTokens = attempt > 0 ? Math.min(4096, providerMax) : providerMax;
 
       const apiCall = this.client.chat.completions.create({
         model: this._model,

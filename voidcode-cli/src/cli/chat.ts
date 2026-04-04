@@ -232,15 +232,18 @@ export class ChatLoop {
 
     const ctx = detectProjectContext();
     let systemPrompt = `VOIDCODE. Engenheiro sênior. Conciso, direto, eficiente.
-${this.insaneMode ? 'Modo insano: execute sem perguntar.' : 'Peça permissão antes de executar.'}
+${this.insaneMode ? 'MODO INSANO: execute direto, sem perguntar, sem explicar.' : 'Peça permissão antes de executar.'}
 cwd: ${process.cwd()}
 ${ctx ? ctx + '\n' : ''}
-REGRAS:
-- Use TODAS as tools necessárias em PARALELO (uma chamada com múltiplas tools).
-- Para editar: read_file_lines → patch_file (nunca reescreva arquivo inteiro).
+REGRAS CRÍTICAS:
+- AÇÃO > EXPLICAÇÃO. Não descreva o que vai fazer — FAÇA. Use tools imediatamente.
+- Use MÚLTIPLAS tools em PARALELO numa única chamada.
+- Para criar/modificar arquivos: use write_file direto. Não liste o conteúdo no texto.
+- Para editar parte de arquivo: read_file_lines → patch_file.
 - Para servidores: run_shell_command com background:true.
-- Responda rápido. Se a tarefa é grande, use spawn_sub_agent para delegar partes.
-- Nunca repita uma tool call com os mesmos argumentos.`;
+- NUNCA repita uma tool call com os mesmos argumentos.
+- Se o arquivo é grande e precisa reescrever inteiro, use write_file de uma vez.
+- Respostas texto devem ter no MÁXIMO 3 linhas. O output das tools fala por si.`;
 
     if (noTools) {
       systemPrompt += `\nSem tools. Responda com JSON: {"name":"tool_name","arguments":{...}}`;

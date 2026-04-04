@@ -6,6 +6,7 @@ export class LLMPool {
   private connections = new Map<string, LLMService>();
   private _defaultProvider: string;
   private _defaultModel: string;
+  private _rateLimited = new Map<string, number>(); // provider → timestamp cooldown
 
   constructor() {
     this._defaultProvider = process.env.LLM_PROVIDER || 'deepseek';
@@ -69,9 +70,25 @@ export class LLMPool {
     return result;
   }
 
+  // Filtra providers com rate limit ativo (60s cooldown)
+  private getAvailableIds(): string[] {
+    const now = Date.now();
+    return [...this.connections.keys()].filter(id => {
+      const limited = this._rateLimited.get(id);
+      if (!limited) return true;
+      if (now - limited > 60_000) { this._rateLimited.delete(id); return true; }
+      return false;
+    });
+  }
+
+  markRateLimited(providerId: string) {
+    this._rateLimited.set(providerId, Date.now());
+  }
+
   getForTask(taskType: TaskType): LLMService {
-    const available = [...this.connections.keys()];
-    if (available.length <= 1) return this.getDefault();
+    const available = this.getAvailableIds();
+    if (available.length === 0) return this.getDefault(); // all limited, try default anyway
+    if (available.length === 1) return this.connections.get(available[0]!)!;
 
     const pick = selectModel(taskType, available);
     return this.connections.get(pick) || this.getDefault();
@@ -79,10 +96,11 @@ export class LLMPool {
 
   getForMessage(message: string): { service: LLMService; taskType: TaskType; routed: boolean } {
     const taskType = classifyTask(message);
-    const available = [...this.connections.keys()];
+    const available = this.getAvailableIds();
 
     if (available.length <= 1) {
-      return { service: this.getDefault(), taskType, routed: false };
+      const svc = available.length === 1 ? this.connections.get(available[0]!)! : this.getDefault();
+      return { service: svc, taskType, routed: available.length === 1 && available[0] !== this._defaultProvider };
     }
 
     const pick = selectModel(taskType, available);

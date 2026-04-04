@@ -109,8 +109,8 @@ export function truncateToolOutput(output: string): string {
     output.substring(output.length - tail);
 }
 
-// --- Fixed Footer (5 linhas: título + input + separador + stats + hints) ---
-const FOOTER_LINES = 5;
+// --- Fixed Footer (3 linhas: título + stats + hints) ---
+const FOOTER_LINES = 3;
 let footerActive = false;
 let lastOpts: any = null;
 
@@ -127,13 +127,6 @@ function setupScrollRegion() {
   process.stdout.write(`\x1b[1;${rows - FOOTER_LINES}r`);
   process.stdout.write('\x1b8');
   if (lastOpts) paintFooter(lastOpts);
-}
-
-// Posiciona cursor na linha do input (entre título e separador)
-export function moveCursorToInput() {
-  if (!process.stdout.isTTY || !footerActive) return;
-  const rows = process.stdout.rows || 24;
-  process.stdout.write(`\x1b[${rows - 3};1H\x1b[2K`);
 }
 
 export function destroyFixedFooter() {
@@ -157,10 +150,7 @@ function paintFooter(opts: any) {
   const tRight = titleRemaining - tLeft;
   const titleBar = chalk.hex(matrixColors.darkGreen)('─'.repeat(tLeft)) + chalk.hex(matrixColors.mediumGreen)(title) + chalk.hex(matrixColors.darkGreen)('─'.repeat(tRight));
 
-  // Linha 2: separador
-  const sep = chalk.hex(matrixColors.darkGreen)('─'.repeat(cols));
-
-  // Linha 3: stats
+  // Linha 2: stats
   const provCount = opts.activeProviders && opts.activeProviders > 1 ? chalk.hex(matrixColors.dim)(`${opts.activeProviders}x`) : '';
   const parts = [
     provCount,
@@ -171,14 +161,12 @@ function paintFooter(opts: any) {
     chalk.hex(matrixColors.dim)(`${opts.requests} reqs`),
   ].filter(Boolean).join(chalk.hex(matrixColors.darkGreen)(' · '));
 
-  // Linha 4: cwd + atalhos
+  // Linha 3: cwd + atalhos
   const cwdStr = shortenPath(opts.cwd);
   const hints = chalk.hex(matrixColors.dim)(`${cwdStr}  ESC pausa · /auth · /help · /exit`);
 
   process.stdout.write('\x1b7');
-  process.stdout.write(`\x1b[${rows - 4};1H\x1b[2K${titleBar}`);
-  // rows-3 = linha do input (não limpa, readline controla)
-  process.stdout.write(`\x1b[${rows - 2};1H\x1b[2K${sep}`);
+  process.stdout.write(`\x1b[${rows - 2};1H\x1b[2K${titleBar}`);
   process.stdout.write(`\x1b[${rows - 1};1H\x1b[2K ${parts}`);
   process.stdout.write(`\x1b[${rows};1H\x1b[2K ${hints}`);
   process.stdout.write('\x1b8');

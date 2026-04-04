@@ -46,6 +46,7 @@ function saveHistory(lines: string[]) {
 
 function getRL(): readline.Interface {
   if (!rl) {
+    readline.emitKeypressEvents(process.stdin);
     rl = readline.createInterface({
       input: process.stdin,
       output: process.stdout,
@@ -1060,11 +1061,22 @@ cwd: ${process.cwd()}`;
 
   // --- Response Processing ---
   private async processResponse() {
-    const sigintHandler = () => {
+    const pauseTask = () => {
+      if (this.abortTask) return;
       this.abortTask = true;
       this.service.abort();
       logger.warn('\n  Pausado. (contexto mantido)');
     };
+
+    // ESC + Ctrl+C listener direto no stdin (sem rawMode — usa keypress do readline)
+    const keypressHandler = (_str: string, key: any) => {
+      if (!key) return;
+      if (key.name === 'escape') pauseTask();
+    };
+    process.stdin.on('keypress', keypressHandler);
+
+    // Ctrl+C via SIGINT
+    const sigintHandler = () => pauseTask();
     process.on('SIGINT', sigintHandler);
 
     let iterations = 0;
@@ -1224,6 +1236,7 @@ cwd: ${process.cwd()}`;
       if (!this.abortTask) logger.error(`Erro: ${error.message}`);
     } finally {
       process.removeListener('SIGINT', sigintHandler);
+      process.stdin.removeListener('keypress', keypressHandler);
       if (this.abortTask) {
         // Injeta resumo do que estava fazendo para o próximo prompt ter contexto
         const lastAssistant = [...this.messages].reverse().find(m => m.role === 'assistant' && m.content);

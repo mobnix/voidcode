@@ -980,8 +980,8 @@ cwd: ${process.cwd()}`;
       const sec = Math.round((Date.now() - start) / 1000);
       const tokens = this.pool.aggregatedUsage.totalTokens;
       process.stdout.write(`\r${chalk.hex('#005500')(`  ${label} ${sec}s | ${tokens > 1000 ? (tokens/1000).toFixed(1)+'k' : tokens} tokens`)}`);
-      // Watchdog: se passou de 70s, aborta (o timeout da API é 60s, dá margem)
-      if (sec > 70 && !this.abortTask) {
+      // Watchdog: se passou de 120s, aborta (o timeout da API é 60s + retries)
+      if (sec > 120 && !this.abortTask) {
         stopped = true;
         clearInterval(interval);
         process.stdout.write('\r\x1b[2K');
@@ -1033,7 +1033,20 @@ cwd: ${process.cwd()}`;
           response = await this.service.chat(this.messages, toolsToSend);
         } catch (e: any) {
           stopTimer();
-          if (this.abortTask) break; // Ctrl+C: sai silenciosamente
+          if (this.abortTask) break;
+
+          // Rate limit: tenta fallback pra outro provider
+          if ((e as any).status === 429 && this.pool.activeCount > 1) {
+            const failedProvider = this.service.provider;
+            const available = this.pool.getAvailable().filter(a => a.providerId !== failedProvider);
+            if (available.length > 0) {
+              const fallback = this.pool.get(available[0]!.providerId)!;
+              logger.warn(`429 ${failedProvider} → fallback ${fallback.provider}/${fallback.modelName}`);
+              this.service = fallback;
+              continue; // retry com outro provider
+            }
+          }
+
           logger.error(`${e.message}`);
           break;
         }

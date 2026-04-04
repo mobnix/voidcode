@@ -64,7 +64,7 @@ export class LLMService {
   }
 
   private async _chatWithRetry(messages: any[], tools: any[] | undefined, attempt: number): Promise<any> {
-    const TIMEOUT = 60_000;
+    const TIMEOUT = 90_000;
     this._abortController = new AbortController();
 
     try {
@@ -106,6 +106,16 @@ export class LLMService {
       return msg;
     } catch (error: any) {
       const msg = error?.message || '';
+      const status = (error as any)?.status || 0;
+
+      // Rate limit (429): propaga com marcação pra pool fazer fallback
+      if (status === 429 || msg.includes('429')) {
+        const err = new Error(`429 rate limit (${this._provider}/${this._model})`);
+        (err as any).status = 429;
+        (err as any).provider = this._provider;
+        throw err;
+      }
+
       if ((msg.includes('413') || msg.includes('too large') || msg.includes('Request too large') || msg.includes('reduce your message')) && attempt < 2) {
         const reduced = this.reduceMessages(messages);
         const reducedTools = attempt === 0 ? tools : undefined;

@@ -315,7 +315,10 @@ REGRAS:
 
       const mode = this.planMode ? chalk.hex('#ADFF2F')('[PLAN] ') : '';
       const busy = this.processing ? chalk.hex('#008F11')('[busy] ') : '';
+      const cols = process.stdout.columns || 80;
+      console.log(chalk.hex('#003B00')('─'.repeat(cols)));
       const userInput = await ask(busy + mode + chalk.hex('#00FF41')('> '));
+      console.log(chalk.hex('#003B00')('─'.repeat(cols)));
 
       if (!userInput) continue;
       if (userInput.toLowerCase() === '/exit' || userInput.toLowerCase() === 'exit') {

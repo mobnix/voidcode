@@ -85,13 +85,13 @@ function ask(promptText: string): Promise<string> {
   });
 }
 
-// --- Tool Result Cache ---
+// --- Tool Result Cache (session-wide para reads, 30s para git) ---
 class ToolCache {
   private cache = new Map<string, { result: string; ts: number }>();
-  private readonly TTL = 10000;
 
   key(name: string, args: any): string {
-    if (!['read_file', 'list_directory', 'git_status', 'git_log', 'glob_files'].includes(name)) return '';
+    const READ_OPS = ['read_file', 'read_file_lines', 'list_directory', 'file_info', 'glob_files', 'grep_search', 'git_status', 'git_log'];
+    if (!READ_OPS.includes(name)) return '';
     return `${name}:${JSON.stringify(args)}`;
   }
 
@@ -99,7 +99,9 @@ class ToolCache {
     if (!k) return null;
     const entry = this.cache.get(k);
     if (!entry) return null;
-    if (Date.now() - entry.ts > this.TTL) { this.cache.delete(k); return null; }
+    // Git ops: TTL 30s. Reads: session-wide (invalidados em writes)
+    const isGit = k.startsWith('git_');
+    if (isGit && Date.now() - entry.ts > 30000) { this.cache.delete(k); return null; }
     return entry.result;
   }
 
@@ -228,21 +230,23 @@ export class ChatLoop {
     const modelName = process.env.LLM_MODEL || 'deepseek-chat';
     const noTools = NO_TOOLS_MODELS.has(modelName);
 
-    let systemPrompt = `VOIDCODE, engenheiro sênior. Conciso.
-O INDEX abaixo já lista todos os arquivos do projeto. Vá direto no arquivo que precisa.
-${this.insaneMode ? 'Execute direto.' : 'Peça permissão.'}
-cwd: ${process.cwd()}`;
+    const ctx = detectProjectContext();
+    let systemPrompt = `VOIDCODE. Engenheiro sênior. Conciso, direto, eficiente.
+${this.insaneMode ? 'Modo insano: execute sem perguntar.' : 'Peça permissão antes de executar.'}
+cwd: ${process.cwd()}
+${ctx ? ctx + '\n' : ''}
+REGRAS:
+- Use TODAS as tools necessárias em PARALELO (uma chamada com múltiplas tools).
+- Para editar: read_file_lines → patch_file (nunca reescreva arquivo inteiro).
+- Para servidores: run_shell_command com background:true.
+- Responda rápido. Se a tarefa é grande, use spawn_sub_agent para delegar partes.
+- Nunca repita uma tool call com os mesmos argumentos.`;
 
     if (noTools) {
-      systemPrompt += `\nVocê NÃO tem acesso a tools. Para executar ações, responda com JSON:\n{"name":"tool_name","arguments":{"param":"value"}}\nTools disponíveis: list_directory, read_file, read_file_lines, write_file, replace_file_content, patch_file, grep_search, glob_files, run_shell_command, git_status, git_diff, git_log, git_commit.`;
-    } else {
-      systemPrompt += `\nTools em paralelo. Deps antes de rodar. background:true para servers. read_file_lines+patch_file para editar.`;
+      systemPrompt += `\nSem tools. Responda com JSON: {"name":"tool_name","arguments":{...}}`;
     }
 
     this.messages.push({ role: 'system', content: systemPrompt });
-
-    const projectCtx = detectProjectContext();
-    if (projectCtx) this.messages.push({ role: 'system', content: projectCtx });
   }
 
   async start() {
@@ -1042,8 +1046,8 @@ cwd: ${process.cwd()}`;
       const sec = Math.round((Date.now() - start) / 1000);
       const tokens = this.pool.aggregatedUsage.totalTokens;
       process.stdout.write(`\r${chalk.hex('#005500')(`  ${label} ${sec}s | ${tokens > 1000 ? (tokens/1000).toFixed(1)+'k' : tokens} tokens`)}`);
-      // Watchdog: se passou de 120s, aborta (o timeout da API é 60s + retries)
-      if (sec > 120 && !this.abortTask) {
+      // Watchdog: se passou de 100s, aborta
+      if (sec > 100 && !this.abortTask) {
         stopped = true;
         clearInterval(interval);
         process.stdout.write('\r\x1b[2K');
@@ -1087,16 +1091,9 @@ cwd: ${process.cwd()}`;
       const modelNoTools = NO_TOOLS_MODELS.has(this.service.modelName);
       const selectedTools = (this.planMode || modelNoTools) ? undefined : (lastUserMsg ? getToolSubset(lastUserMsg.content) : this.allTools);
 
-      while (!this.abortTask && iterations++ < 25) {
-        let toolsToSend = selectedTools;
-        if (iterations > 1 && selectedTools) {
-          const usedNames = new Set<string>();
-          for (const m of this.messages) {
-            if (m.tool_calls) for (const tc of m.tool_calls) usedNames.add(tc.function.name);
-          }
-          const extra = this.allTools.filter((t: any) => usedNames.has(t.function.name) && !selectedTools.some((s: any) => s.function.name === t.function.name));
-          toolsToSend = extra.length ? [...selectedTools, ...extra] : selectedTools;
-        }
+      while (!this.abortTask && iterations++ < 10) {
+        // Tools fixas por iteração — sem expansão dinâmica que infla o payload
+        const toolsToSend = selectedTools;
 
         this.messages = this.sanitizeMessages(this.messages);
         this.compressOldMessages();
@@ -1287,12 +1284,12 @@ cwd: ${process.cwd()}`;
     return null;
   }
 
-  // Estima tokens de uma mensagem (~4 chars por token)
+  // Estima tokens (~3 chars por token para código/JSON)
   private estimateTokens(msg: any): number {
     let chars = 0;
     if (msg.content) chars += msg.content.length;
     if (msg.tool_calls) chars += JSON.stringify(msg.tool_calls).length;
-    return Math.ceil(chars / 4);
+    return Math.ceil(chars / 3);
   }
 
   // Token budget: garante que o total de messages não passe do limite

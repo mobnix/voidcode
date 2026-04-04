@@ -997,11 +997,18 @@ REGRAS CRÍTICAS:
       try {
         const svc = this.pool.getForTask('sub_agent');
         const msgs: any[] = [
-          { role: 'system', content: `Sub-agente VOIDCODE. Direto. Tools em paralelo. cwd: ${process.cwd()}` },
+          { role: 'system', content: `Sub-agente VOIDCODE. REGRAS:
+- AÇÃO IMEDIATA. Não explore, não investigue — FAÇA o que foi pedido.
+- Use write_file direto para criar/modificar arquivos grandes.
+- Múltiplas tools em PARALELO numa única chamada.
+- NUNCA leia o mesmo arquivo 2 vezes. NUNCA repita tools.
+- MAX 3 linhas de texto. O output das tools fala por si.
+- Se precisa subir server: run_shell_command com background:true.
+cwd: ${process.cwd()}` },
           { role: 'user', content: objective }
         ];
 
-        for (let i = 0; i < 20; i++) {
+        for (let i = 0; i < 10; i++) {
           const agentTokens = svc.sessionUsage.totalTokens;
           updateStatus(`thinking... ${agentTokens > 1000 ? (agentTokens/1000).toFixed(1)+'k' : agentTokens} tokens`, i + 1);
 

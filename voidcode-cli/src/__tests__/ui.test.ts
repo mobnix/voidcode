@@ -16,7 +16,7 @@ describe('truncateToolOutput', () => {
     const input = 'x'.repeat(20000);
     const result = truncateToolOutput(input);
     expect(result.length).toBeLessThan(input.length);
-    expect(result).toContain('ocultos');
+    expect(result).toContain('truncados');
   });
 
   it('preserves head and tail of truncated content', () => {

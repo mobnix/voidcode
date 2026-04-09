@@ -1,8 +1,7 @@
 import axios from 'axios';
 import chalk from 'chalk';
-import { logger } from '../utils/ui.js';
 
-const POLL_INTERVAL = 2000; // 2s entre polls
+const POLL_INTERVAL = 2000;
 
 export class TelegramBridge {
   private token: string;
@@ -11,33 +10,35 @@ export class TelegramBridge {
   private running = false;
   private chatId: string | null = null;
   private onMessage: (text: string) => Promise<string>;
+  private silent: boolean;
 
-  constructor(token: string, onMessage: (text: string) => Promise<string>) {
+  constructor(token: string, onMessage: (text: string) => Promise<string>, silent = false) {
     this.token = token;
     this.baseURL = `https://api.telegram.org/bot${token}`;
     this.onMessage = onMessage;
+    this.silent = silent;
   }
 
   async start(): Promise<boolean> {
-    // Verifica se o token é válido
     try {
       const res = await axios.get(`${this.baseURL}/getMe`, { timeout: 5000 });
       if (!res.data.ok) return false;
       const botName = res.data.result.username;
-      logger.success(`Telegram bot @${botName} conectado.`);
-      logger.info('Envie uma mensagem para o bot no Telegram para começar.');
+      if (!this.silent) {
+        process.stderr.write(chalk.hex('#008F11')(`  ✓ Telegram @${botName} conectado (background)\n`));
+      }
       this.running = true;
-      this.poll();
+      // Não bloqueia — inicia polling em background
+      this.poll().catch(() => {});
       return true;
     } catch (e: any) {
-      logger.error(`Telegram: ${e.message}`);
+      if (!this.silent) process.stderr.write(chalk.red(`  ✗ Telegram: ${e.message}\n`));
       return false;
     }
   }
 
   stop() {
     this.running = false;
-    logger.info('Telegram bot desconectado.');
   }
 
   get isRunning() { return this.running; }
@@ -57,14 +58,11 @@ export class TelegramBridge {
             if (update.message?.text) {
               const chatId = update.message.chat.id;
               const text = update.message.text;
-              const from = update.message.from?.first_name || 'User';
-
               this.chatId = chatId;
-              logger.info(`[TG] ${from}: ${text}`);
 
-              // Comandos do Telegram
+              // Comandos internos do Telegram
               if (text === '/start') {
-                await this.send(chatId, '🟢 VoidCode conectado. Envie comandos como se estivesse no terminal.');
+                await this.send(chatId, '🟢 VoidCode conectado.\nEnvie comandos como se estivesse no terminal.\n\n/status — ver status\n/stop — desconectar');
                 continue;
               }
               if (text === '/status') {
@@ -77,11 +75,10 @@ export class TelegramBridge {
                 return;
               }
 
-              // Envia para o ChatLoop processar
+              // Processa via callback — tudo em background, sem tocar no terminal
               try {
                 await this.send(chatId, '⏳ Processando...');
                 const response = await this.onMessage(text);
-                // Telegram tem limite de 4096 chars por mensagem
                 const chunks = this.splitMessage(response);
                 for (const chunk of chunks) {
                   await this.send(chatId, chunk);
@@ -93,10 +90,8 @@ export class TelegramBridge {
           }
         }
       } catch (e: any) {
-        // Timeout é normal no long polling
         if (!e.message?.includes('timeout')) {
-          logger.error(`[TG] Poll error: ${e.message}`);
-          await new Promise(r => setTimeout(r, 5000)); // Espera antes de retry
+          await new Promise(r => setTimeout(r, 5000));
         }
       }
     }
@@ -110,7 +105,6 @@ export class TelegramBridge {
         parse_mode: 'Markdown'
       }, { timeout: 10000 });
     } catch {
-      // Tenta sem Markdown se falhar (chars especiais)
       try {
         await axios.post(`${this.baseURL}/sendMessage`, {
           chat_id: chatId,

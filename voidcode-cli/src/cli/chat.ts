@@ -7,11 +7,11 @@ import { LLMService } from '../core/llm-service.js';
 import { LLMPool } from '../core/pool.js';
 import { detectProviderOverride, stripProviderOverride } from '../core/router.js';
 import { PROVIDERS, NO_TOOLS_MODELS } from '../core/providers.js';
-import { logger, smartOutput, truncateToolOutput, renderFooter, initFixedFooter, destroyFixedFooter, toolProgress } from '../utils/ui.js';
+import { logger, smartOutput, truncateToolOutput, renderFooter, initFixedFooter, destroyFixedFooter } from '../utils/ui.js';
 import { tools, toolHandlers, getToolSubset } from '../tools/index.js';
 import { loadSkills } from '../skills/index.js';
 import { safeJSONParse } from '../utils/json.js';
-import { detectProjectContext, loadStructuredMemory } from '../core/context.js';
+import { detectProjectContext } from '../core/context.js';
 import { execSync } from 'node:child_process';
 import { TelegramBridge } from '../core/telegram.js';
 
@@ -155,7 +155,7 @@ function loadAllSessions(): SessionEntry[] {
 
 function formatSessionForDisplay(s: SessionEntry, index: number): string {
   const ago = getTimeAgo(new Date(s.timestamp));
-  const cwdShort = s.cwd.replace(process.env.HOME || '', '~');
+  const cwdShort = s.cwd.replace(process.env.HOME || process.env.USERPROFILE || '', '~');
   return `  ${chalk.hex('#ADFF2F')(`${index + 1})`)} ${chalk.hex('#008F11')(ago)} ${chalk.hex('#005500')(`(${cwdShort})`)}\n     ${chalk.hex('#00FF41')(s.summary.substring(0, 120))}`;
 }
 
@@ -169,6 +169,20 @@ function getTimeAgo(date: Date): string {
 }
 
 // --- Pre-prompt: snapshot do cwd antes de cada tarefa ---
+/** Limpa markup DSML, fake tool calls e tokens especiais que modelos vazam */
+function cleanModelGarbage(text: string): string {
+  return text
+    // DSML fullwidth e normal
+    .replace(/<[｜|]DSML[｜|][\s\S]*$/g, '') // DSML até o fim (incompleto)
+    .replace(/<[｜|]DSML[｜|][\s\S]*?<\/[｜|]DSML[｜|][^>]*>/g, '') // DSML completo
+    .replace(/<[｜|]DSML[｜|][^>]*>/g, '')
+    // Tokens especiais
+    .replace(/<\|im_start\|>|<\|im_end\|>|<\|endoftext\|>|<s>|<\/s>/g, '')
+    // JSON de fake tool call que deepseek-reasoner emite
+    .replace(/^\s*\{\s*"name"\s*:\s*"[a-z_]+"\s*,\s*"arguments"\s*:\s*\{[\s\S]*\}\s*\}\s*$/g, '')
+    .trim();
+}
+
 function getCwdSnapshot(): string {
   const parts: string[] = [];
   try {
@@ -178,8 +192,9 @@ function getCwdSnapshot(): string {
     parts.push(`Arquivos: ${[...dirs, ...regular].slice(0, 30).join(', ')}${files.length > 30 ? '...' : ''}`);
   } catch { /* ok */ }
   try {
-    const status = execSync('git status --short 2>/dev/null', { encoding: 'utf-8', timeout: 3000 }).trim();
-    const branch = execSync('git branch --show-current 2>/dev/null', { encoding: 'utf-8', timeout: 3000 }).trim();
+    const devNull = process.platform === 'win32' ? '2>NUL' : '2>/dev/null';
+    const status = execSync(`git status --short ${devNull}`, { encoding: 'utf-8', timeout: 3000 }).trim();
+    const branch = execSync(`git branch --show-current ${devNull}`, { encoding: 'utf-8', timeout: 3000 }).trim();
     if (branch) parts.push(`Git: ${branch}${status ? `, ${status.split('\n').length} mudanças` : ', limpo'}`);
   } catch { /* not git */ }
   return parts.join(' | ');
@@ -221,7 +236,7 @@ export class ChatLoop {
   private taskQueue: string[] = [];
   private continueMode = false;
   private terminalLog: string[] = []; // últimas 50 linhas do terminal
-  private _origConsoleLog = console.log;
+  // (removed unused _origConsoleLog)
 
   constructor(insaneMode = false, continueMode = false) {
     this.continueMode = continueMode;
@@ -263,8 +278,10 @@ export class ChatLoop {
     const noTools = NO_TOOLS_MODELS.has(modelName);
 
     const ctx = detectProjectContext();
+    const osInfo = process.platform === 'win32' ? 'OS: Windows. Use comandos Windows (dir, cd, type, etc). NÃO use pwd, ls, cat.' : `OS: ${process.platform}`;
     let systemPrompt = `VOIDCODE. Engenheiro sênior. Conciso, direto, eficiente.
 ${this.insaneMode ? 'MODO INSANO: execute direto, sem perguntar, sem explicar.' : 'Peça permissão antes de executar.'}
+${osInfo}
 cwd: ${process.cwd()}
 ${ctx ? ctx + '\n' : ''}
 REGRAS CRÍTICAS:
@@ -300,7 +317,7 @@ REGRAS CRÍTICAS:
         const oldMsgs = last.messages.filter(m => m.role !== 'system');
         this.messages.push({ role: 'system', content: `[SESSÃO RETOMADA]: ${last.summary}` });
         this.messages.push(...oldMsgs);
-        const cwdShort = last.cwd.replace(process.env.HOME || '', '~');
+        const cwdShort = last.cwd.replace(process.env.HOME || process.env.USERPROFILE || '', '~');
         logger.success(`Sessão restaurada (${oldMsgs.length} msgs, ${cwdShort})\n`);
 
         // Mostra últimas linhas do terminal pra user lembrar o que aconteceu
@@ -335,6 +352,12 @@ REGRAS CRÍTICAS:
           logger.success(`Sessão ${idx + 1} restaurada.`);
         }
       }
+    }
+
+    // Auto-conecta Telegram se token existir
+    const tgToken = process.env.TELEGRAM_BOT_TOKEN;
+    if (tgToken && tgToken.length > 20) {
+      this.startTelegramBot(tgToken);
     }
 
     // Ativa footer fixo AGORA - todo output inicial já foi feito
@@ -373,9 +396,12 @@ REGRAS CRÍTICAS:
         }
       } else if (this.pool.activeCount > 1) {
         // Roteamento automático
-        const { service, taskType, routed } = this.pool.getForMessage(actualInput);
+        const { service, taskType, routed, modelSwitch } = this.pool.getForMessage(actualInput);
         this.service = service;
-        if (routed) logger.dim(`  → ${service.provider}/${service.modelName} (${taskType})`);
+        if (routed || modelSwitch) {
+          const info = modelSwitch ? `${service.provider}/${service.modelName} [${modelSwitch}]` : `${service.provider}/${service.modelName}`;
+          logger.dim(`  → ${info} (${taskType})`);
+        }
       }
 
       // Se já está processando, spawna agente paralelo (sem limite)
@@ -594,173 +620,204 @@ REGRAS CRÍTICAS:
     console.log();
   }
 
+  private async addProvider(provider?: typeof PROVIDERS[number]) {
+    if (!provider) {
+      console.log(chalk.hex('#00FF41')('\n  Providers disponíveis:'));
+      PROVIDERS.forEach((p, i) => {
+        if (p.id === 'custom') return;
+        const hasKey = this.pool.get(p.id) ? chalk.hex('#00FF41')(' ✓') : '';
+        console.log(`  ${i + 1}) ${chalk.hex('#ADFF2F')(p.name)}${hasKey}`);
+      });
+      const idx = parseInt(await ask(chalk.hex('#008F11')('\nProvider: '))) - 1;
+      if (idx < 0 || idx >= PROVIDERS.length) return;
+      provider = PROVIDERS[idx]!;
+    }
+
+    let baseURL = provider.baseURL;
+    let apiKey = '';
+
+    if (provider.id === 'ollama') {
+      apiKey = 'ollama';
+      const host = await ask(chalk.hex('#008F11')(`Ollama host (${baseURL}): `));
+      if (host) baseURL = host;
+    } else if (provider.id === 'gemini') {
+      const existing = process.env[provider.envKey];
+      if (existing) {
+        const masked = existing.substring(0, 6) + '...' + existing.substring(existing.length - 4);
+        console.log(chalk.hex('#008F11')(`  Key atual: ${masked}`));
+        const change = await ask(chalk.hex('#008F11')('Trocar key? (y/N): '));
+        if (change.toLowerCase() !== 'y') {
+          apiKey = existing;
+        } else {
+          const { openGoogleAIStudio } = await import('../core/google-auth.js');
+          logger.info('Abrindo Google AI Studio no navegador...');
+          console.log(chalk.hex('#005500')('  Faça login com sua conta Google e copie a API Key.\n'));
+          openGoogleAIStudio();
+          apiKey = await ask(chalk.hex('#008F11')('Cole a API Key: '));
+        }
+      } else {
+        const { openGoogleAIStudio } = await import('../core/google-auth.js');
+        logger.info('Abrindo Google AI Studio no navegador...');
+        console.log(chalk.hex('#005500')('  Faça login com sua conta Google e copie a API Key.\n'));
+        openGoogleAIStudio();
+        apiKey = await ask(chalk.hex('#008F11')('Cole a API Key: '));
+      }
+      if (!apiKey || apiKey.length < 5) { logger.error('Key inválida.'); return; }
+    } else {
+      const existing = process.env[provider.envKey];
+      if (existing) {
+        const masked = existing.substring(0, 6) + '...' + existing.substring(existing.length - 4);
+        console.log(chalk.hex('#008F11')(`  Key atual: ${masked}`));
+        const change = await ask(chalk.hex('#008F11')('Trocar key? (y/N): '));
+        apiKey = change.toLowerCase() === 'y' ? await ask(chalk.hex('#008F11')('Nova key: ')) : existing;
+      } else {
+        apiKey = await ask(chalk.hex('#008F11')(`${provider.name} API Key: `));
+      }
+      if (!apiKey || apiKey.length < 5) { logger.error('Key inválida.'); return; }
+    }
+
+    // Escolher modelo
+    let model = provider.models[0]?.id || '';
+    if (provider.models.length > 1) {
+      console.log(chalk.hex('#00FF41')('\n  Modelos:'));
+      provider.models.forEach((m, i) => {
+        console.log(`  ${i + 1}) ${chalk.hex('#ADFF2F')(m.name)} ${chalk.hex('#005500')(`- ${m.description} [${m.contextWindow/1000}k ctx, ${m.costTier}]`)}`);
+      });
+      const mi = parseInt(await ask(chalk.hex('#008F11')('Modelo: '))) - 1;
+      if (mi >= 0 && mi < provider.models.length) model = provider.models[mi]!.id;
+    }
+    if (!model) return;
+
+    // Salva key e adiciona ao pool
+    saveConfig({ apiKey, envKey: provider.envKey });
+    this.pool.addProvider(provider.id, apiKey, baseURL, model);
+    logger.success(`✓ ${provider.name}/${model} conectado`);
+
+    // Se é o primeiro provider, seta como default
+    if (this.pool.activeCount === 1) {
+      this.pool.setDefault(provider.id, model);
+      saveConfig({ provider: provider.id, model, baseURL });
+      this.service = this.pool.getDefault();
+    }
+  }
+
   private async authMenu() {
     const sep = chalk.hex('#003B00')('─'.repeat(process.stdout.columns || 80));
 
-    console.log(`\n${sep}\n${chalk.hex('#00FF41').bold('  PROVIDERS CONECTADOS')}`);
-    console.log(chalk.hex('#005500')(`  Routing: ${this.pool.activeCount > 1 ? 'AUTO' : 'SINGLE'} (${this.pool.activeCount} provider${this.pool.activeCount !== 1 ? 's' : ''} ativo${this.pool.activeCount !== 1 ? 's' : ''})`));
-    console.log(sep);
+    while (true) {
+      console.log(`\n${sep}\n${chalk.hex('#00FF41').bold('  PROVIDERS CONECTADOS')}`);
+      console.log(chalk.hex('#005500')(`  Routing: ${this.pool.activeCount > 1 ? 'AUTO' : 'SINGLE'} (${this.pool.activeCount} provider${this.pool.activeCount !== 1 ? 's' : ''} ativo${this.pool.activeCount !== 1 ? 's' : ''})`));
+      console.log(sep);
 
-    PROVIDERS.forEach((p, i) => {
-      if (p.id === 'custom' && !process.env[p.envKey]) return;
-      const connected = this.pool.get(p.id);
-      const status = connected ? chalk.hex('#00FF41')('[✓ ativo]') : chalk.hex('#005500')('[✗ sem key]');
-      const isDefault = p.id === this.pool.defaultProvider ? chalk.hex('#ADFF2F')(' ◀ default') : '';
-      const modelInfo = connected ? chalk.hex('#005500')(` (${connected.modelName})`) : '';
-      const caps = p.models[0]?.capabilities?.join(', ') || '';
-      const capsStr = caps ? chalk.hex('#005500')(` [${caps}]`) : '';
-      console.log(`  ${chalk.hex('#008F11')(`${i + 1})`)} ${chalk.hex('#ADFF2F')(p.name)} ${status}${isDefault}${modelInfo}${capsStr}`);
-    });
+      PROVIDERS.forEach((p, i) => {
+        if (p.id === 'custom' && !process.env[p.envKey]) return;
+        const connected = this.pool.get(p.id);
+        const status = connected ? chalk.hex('#00FF41')('[✓ ativo]') : chalk.hex('#005500')('[✗ sem key]');
+        const isDefault = p.id === this.pool.defaultProvider ? chalk.hex('#ADFF2F')(' ◀ default') : '';
+        const modelInfo = connected ? chalk.hex('#005500')(` (${connected.modelName})`) : '';
+        const caps = p.models[0]?.capabilities?.join(', ') || '';
+        const capsStr = caps ? chalk.hex('#005500')(` [${caps}]`) : '';
+        console.log(`  ${chalk.hex('#008F11')(`${i + 1})`)} ${chalk.hex('#ADFF2F')(p.name)} ${status}${isDefault}${modelInfo}${capsStr}`);
+      });
 
-    console.log(`\n  ${chalk.hex('#ADFF2F')('A)')} Adicionar/atualizar provider`);
-    console.log(`  ${chalk.hex('#ADFF2F')('D)')} Mudar provider padrão`);
-    console.log(`  ${chalk.hex('#ADFF2F')('M)')} Mudar modelo do provider ativo`);
-    console.log(`  ${chalk.hex('#ADFF2F')('R)')} Remover provider`);
-    console.log(`  ${chalk.hex('#008F11')('0)')} Voltar\n`);
+      console.log(`\n  ${chalk.hex('#ADFF2F')('A)')} Adicionar/atualizar provider`);
+      console.log(`  ${chalk.hex('#ADFF2F')('D)')} Mudar provider padrão`);
+      console.log(`  ${chalk.hex('#ADFF2F')('M)')} Mudar modelo do provider ativo`);
+      console.log(`  ${chalk.hex('#ADFF2F')('R)')} Remover provider`);
+      console.log(`  ${chalk.hex('#008F11')('0)')} Voltar\n`);
 
-    const choice = (await ask(chalk.hex('#008F11')('Opção: '))).toLowerCase();
+      const choice = (await ask(chalk.hex('#008F11')('Opção: '))).toLowerCase();
 
-    switch (choice) {
-      case 'a': case 'add': {
-        // Listar providers para adicionar
-        console.log(chalk.hex('#00FF41')('\n  Providers disponíveis:'));
-        PROVIDERS.forEach((p, i) => {
-          if (p.id === 'custom') return;
-          const hasKey = this.pool.get(p.id) ? chalk.hex('#00FF41')(' ✓') : '';
-          console.log(`  ${i + 1}) ${chalk.hex('#ADFF2F')(p.name)}${hasKey}`);
-        });
-        const idx = parseInt(await ask(chalk.hex('#008F11')('\nProvider: '))) - 1;
-        if (idx < 0 || idx >= PROVIDERS.length) return;
-        const provider = PROVIDERS[idx]!;
+      if (choice === '0' || choice === '') break;
 
-        let baseURL = provider.baseURL;
-        let apiKey = '';
-
-        if (provider.id === 'ollama') {
-          apiKey = 'ollama';
-          const host = await ask(chalk.hex('#008F11')(`Ollama host (${baseURL}): `));
-          if (host) baseURL = host;
-        } else {
-          const existing = process.env[provider.envKey];
-          if (existing) {
-            const masked = existing.substring(0, 6) + '...' + existing.substring(existing.length - 4);
-            console.log(chalk.hex('#008F11')(`  Key atual: ${masked}`));
-            const change = await ask(chalk.hex('#008F11')('Trocar key? (y/N): '));
-            apiKey = change.toLowerCase() === 'y' ? await ask(chalk.hex('#008F11')('Nova key: ')) : existing;
-          } else {
-            apiKey = await ask(chalk.hex('#008F11')(`${provider.name} API Key: `));
-          }
-          if (!apiKey || apiKey.length < 5) { logger.error('Key inválida.'); return; }
+      switch (choice) {
+        case 'a': case 'add': {
+          await this.addProvider();
+          break;
         }
 
-        // Escolher modelo
-        let model = provider.models[0]?.id || '';
-        if (provider.models.length > 1) {
+        case 'd': case 'default': {
+          const available = this.pool.getAvailable();
+          if (available.length === 0) { logger.error('Nenhum provider conectado.'); break; }
+          console.log(chalk.hex('#00FF41')('\n  Providers ativos:'));
+          available.forEach((a, i) => {
+            const def = a.providerId === this.pool.defaultProvider ? chalk.hex('#ADFF2F')(' ◀ atual') : '';
+            console.log(`  ${i + 1}) ${chalk.hex('#ADFF2F')(a.provider.name)} / ${a.model}${def}`);
+          });
+          const di = parseInt(await ask(chalk.hex('#008F11')('Novo default: '))) - 1;
+          if (di < 0 || di >= available.length) break;
+          const pick = available[di]!;
+          this.pool.setDefault(pick.providerId, pick.model);
+          this.service = this.pool.getDefault();
+          saveConfig({ provider: pick.providerId, model: pick.model, baseURL: pick.provider.baseURL });
+          logger.success(`★ Default: ${pick.provider.name}/${pick.model}`);
+          break;
+        }
+
+        case 'm': case 'model': {
+          const available = this.pool.getAvailable();
+          if (available.length === 0) { logger.error('Nenhum provider conectado.'); break; }
+          console.log(chalk.hex('#00FF41')('\n  Providers ativos:'));
+          available.forEach((a, i) => {
+            console.log(`  ${i + 1}) ${chalk.hex('#ADFF2F')(a.provider.name)} / ${a.model}`);
+          });
+          const pi = parseInt(await ask(chalk.hex('#008F11')('Provider: '))) - 1;
+          if (pi < 0 || pi >= available.length) break;
+          const prov = available[pi]!;
+          const provDef = PROVIDERS.find(p => p.id === prov.providerId);
+          if (!provDef?.models.length) { logger.error('Sem modelos.'); break; }
           console.log(chalk.hex('#00FF41')('\n  Modelos:'));
-          provider.models.forEach((m, i) => {
-            console.log(`  ${i + 1}) ${chalk.hex('#ADFF2F')(m.name)} ${chalk.hex('#005500')(`- ${m.description} [${m.contextWindow/1000}k ctx, ${m.costTier}]`)}`);
+          provDef.models.forEach((m, i) => {
+            const cur = m.id === prov.model ? chalk.hex('#ADFF2F')(' ◀ atual') : '';
+            console.log(`  ${i + 1}) ${chalk.hex('#ADFF2F')(m.name)} ${chalk.hex('#005500')(`[${m.contextWindow/1000}k, ${m.costTier}]`)}${cur}`);
           });
           const mi = parseInt(await ask(chalk.hex('#008F11')('Modelo: '))) - 1;
-          if (mi >= 0 && mi < provider.models.length) model = provider.models[mi]!.id;
+          if (mi < 0 || mi >= provDef.models.length) break;
+          const newModel = provDef.models[mi]!.id;
+          const svc = this.pool.get(prov.providerId);
+          if (svc) svc.setModel(newModel);
+          if (prov.providerId === this.pool.defaultProvider) {
+            this.pool.setDefaultModel(newModel);
+            saveConfig({ model: newModel });
+          }
+          logger.success(`Modelo: ${prov.provider.name}/${newModel}`);
+          break;
         }
-        if (!model) return;
 
-        // Salva key e adiciona ao pool
-        saveConfig({ apiKey, envKey: provider.envKey });
-        this.pool.addProvider(provider.id, apiKey, baseURL, model);
-        logger.success(`✓ ${provider.name}/${model} conectado`);
-
-        // Se é o primeiro provider, seta como default
-        if (this.pool.activeCount === 1) {
-          this.pool.setDefault(provider.id, model);
-          saveConfig({ provider: provider.id, model, baseURL });
+        case 'r': case 'remove': {
+          const available = this.pool.getAvailable();
+          if (available.length === 0) { logger.error('Nenhum provider conectado.'); break; }
+          console.log(chalk.hex('#00FF41')('\n  Remover provider:'));
+          available.forEach((a, i) => {
+            console.log(`  ${i + 1}) ${chalk.hex('#ADFF2F')(a.provider.name)} / ${a.model}`);
+          });
+          const ri = parseInt(await ask(chalk.hex('#008F11')('Remover: '))) - 1;
+          if (ri < 0 || ri >= available.length) break;
+          const rem = available[ri]!;
+          const confirm = await ask(chalk.hex('#ADFF2F')(`  Remover ${rem.provider.name}? Key será apagada. (y/N): `));
+          if (confirm.toLowerCase() !== 'y') break;
+          this.pool.removeProvider(rem.providerId);
+          removeConfigKey(rem.provider.envKey);
           this.service = this.pool.getDefault();
+          logger.success(`${rem.provider.name} removido.`);
+          break;
         }
-        break;
-      }
 
-      case 'd': case 'default': {
-        const available = this.pool.getAvailable();
-        if (available.length === 0) { logger.error('Nenhum provider conectado.'); return; }
-        console.log(chalk.hex('#00FF41')('\n  Providers ativos:'));
-        available.forEach((a, i) => {
-          const def = a.providerId === this.pool.defaultProvider ? chalk.hex('#ADFF2F')(' ◀ atual') : '';
-          console.log(`  ${i + 1}) ${chalk.hex('#ADFF2F')(a.provider.name)} / ${a.model}${def}`);
-        });
-        const di = parseInt(await ask(chalk.hex('#008F11')('Novo default: '))) - 1;
-        if (di < 0 || di >= available.length) return;
-        const pick = available[di]!;
-        this.pool.setDefault(pick.providerId, pick.model);
-        this.service = this.pool.getDefault();
-        saveConfig({ provider: pick.providerId, model: pick.model, baseURL: pick.provider.baseURL });
-        logger.success(`★ Default: ${pick.provider.name}/${pick.model}`);
-        break;
-      }
-
-      case 'm': case 'model': {
-        const available = this.pool.getAvailable();
-        if (available.length === 0) { logger.error('Nenhum provider conectado.'); return; }
-        console.log(chalk.hex('#00FF41')('\n  Providers ativos:'));
-        available.forEach((a, i) => {
-          console.log(`  ${i + 1}) ${chalk.hex('#ADFF2F')(a.provider.name)} / ${a.model}`);
-        });
-        const pi = parseInt(await ask(chalk.hex('#008F11')('Provider: '))) - 1;
-        if (pi < 0 || pi >= available.length) return;
-        const prov = available[pi]!;
-        const provDef = PROVIDERS.find(p => p.id === prov.providerId);
-        if (!provDef?.models.length) { logger.error('Sem modelos.'); return; }
-        console.log(chalk.hex('#00FF41')('\n  Modelos:'));
-        provDef.models.forEach((m, i) => {
-          const cur = m.id === prov.model ? chalk.hex('#ADFF2F')(' ◀ atual') : '';
-          console.log(`  ${i + 1}) ${chalk.hex('#ADFF2F')(m.name)} ${chalk.hex('#005500')(`[${m.contextWindow/1000}k, ${m.costTier}]`)}${cur}`);
-        });
-        const mi = parseInt(await ask(chalk.hex('#008F11')('Modelo: '))) - 1;
-        if (mi < 0 || mi >= provDef.models.length) return;
-        const newModel = provDef.models[mi]!.id;
-        const svc = this.pool.get(prov.providerId);
-        if (svc) svc.setModel(newModel);
-        if (prov.providerId === this.pool.defaultProvider) {
-          this.pool.setDefaultModel(newModel);
-          saveConfig({ model: newModel });
-        }
-        logger.success(`Modelo: ${prov.provider.name}/${newModel}`);
-        break;
-      }
-
-      case 'r': case 'remove': {
-        const available = this.pool.getAvailable();
-        if (available.length === 0) { logger.error('Nenhum provider conectado.'); return; }
-        console.log(chalk.hex('#00FF41')('\n  Remover provider:'));
-        available.forEach((a, i) => {
-          console.log(`  ${i + 1}) ${chalk.hex('#ADFF2F')(a.provider.name)} / ${a.model}`);
-        });
-        const ri = parseInt(await ask(chalk.hex('#008F11')('Remover: '))) - 1;
-        if (ri < 0 || ri >= available.length) return;
-        const rem = available[ri]!;
-        const confirm = await ask(chalk.hex('#ADFF2F')(`  Remover ${rem.provider.name}? Key será apagada. (y/N): `));
-        if (confirm.toLowerCase() !== 'y') return;
-        this.pool.removeProvider(rem.providerId);
-        removeConfigKey(rem.provider.envKey);
-        this.service = this.pool.getDefault();
-        logger.success(`${rem.provider.name} removido.`);
-        break;
-      }
-
-      default: {
-        // Se digitou número, tenta como atalho pra adicionar
-        const idx = parseInt(choice) - 1;
-        if (idx >= 0 && idx < PROVIDERS.length) {
-          // Redireciona pra add com este provider pré-selecionado
-          const provider = PROVIDERS[idx]!;
-          if (this.pool.get(provider.id)) {
-            // Já conectado, troca pra ele como default
-            const svc = this.pool.get(provider.id)!;
-            this.pool.setDefault(provider.id, svc.modelName);
-            this.service = svc;
-            saveConfig({ provider: provider.id, model: svc.modelName, baseURL: provider.baseURL });
-            logger.success(`★ Default: ${provider.name}/${svc.modelName}`);
-          } else {
-            logger.info(`Use a opção A para adicionar ${provider.name}.`);
+        default: {
+          // Número = adicionar/trocar pra esse provider direto
+          const idx = parseInt(choice) - 1;
+          if (idx >= 0 && idx < PROVIDERS.length) {
+            const provider = PROVIDERS[idx]!;
+            if (this.pool.get(provider.id)) {
+              const svc = this.pool.get(provider.id)!;
+              this.pool.setDefault(provider.id, svc.modelName);
+              this.service = svc;
+              saveConfig({ provider: provider.id, model: svc.modelName, baseURL: provider.baseURL });
+              logger.success(`★ Default: ${provider.name}/${svc.modelName}`);
+            } else {
+              // Adiciona direto sem precisar da opção A
+              await this.addProvider(provider);
+            }
           }
         }
       }
@@ -892,42 +949,91 @@ REGRAS CRÍTICAS:
       saveConfig({ envKey: 'TELEGRAM_BOT_TOKEN', apiKey: token });
     }
 
-    // Inicia o bot
+    // Inicia o bot com histórico SEPARADO do terminal
+    this.startTelegramBot(token);
+  }
+
+  private startTelegramBot(token: string) {
     this.telegramBot = new TelegramBridge(token, async (text: string) => {
-      // Processa como se fosse input do usuário
-      this.messages.push({ role: 'user', content: `[TELEGRAM] ${text}` });
-      this.toolCache.invalidate();
+      try {
+        // Mostra no terminal
+        console.log(chalk.hex('#ADFF2F')(`\n  [Telegram] `) + chalk.hex('#00FF41')(text));
 
-      const snapshot = getCwdSnapshot();
-      if (snapshot) this.messages.push({ role: 'system', content: `[CWD]: ${snapshot}` });
+        // Mesma conversa do terminal
+        this.messages.push({ role: 'user', content: text });
+        this.toolCache.invalidate();
 
-      // Processa e captura resposta
-      this.messages = this.sanitizeMessages(this.messages);
-      const tgService = this.pool.getDefault();
-      const response = await tgService.chat(this.messages, this.allTools as any);
-      this.messages.push(response);
+        const snapshot = getCwdSnapshot();
+        if (snapshot) this.messages.push({ role: 'system', content: `[CWD]: ${snapshot}` });
 
-      // Se tem tool calls, executa
-      if (response.tool_calls?.length) {
-        const results = await Promise.all(response.tool_calls.map(async (tc: any) => {
-          const handler = this.allHandlers[tc.function.name];
-          const args = safeJSONParse(tc.function.arguments);
-          const result = handler ? await handler(args) : 'N/A';
-          return { role: 'tool' as const, tool_call_id: tc.id, content: truncateToolOutput(String(result)) };
-        }));
-        this.messages.push(...results);
+        // Roteamento inteligente: escolhe provider + modelo ideal pra tarefa
+        const { service: svc, taskType, modelSwitch } = this.pool.getForMessage(text);
+        const lockedModel = svc.modelName; // trava o modelo pra toda a execução
+        if (modelSwitch) console.log(chalk.hex('#005500')(`  [auto] ${svc.provider}/${lockedModel} (${taskType})`));
+        const modelNoTools = NO_TOOLS_MODELS.has(lockedModel);
+        const selectedTools = modelNoTools ? undefined : getToolSubset(text);
 
-        // Segunda chamada para resposta final
-        this.messages = this.sanitizeMessages(this.messages);
-        const finalResponse = await tgService.chat(this.messages, this.allTools as any);
-        this.messages.push(finalResponse);
-        return finalResponse.content || 'Executado (sem resposta texto).';
+        // Loop de tool calls (máx 8 rounds)
+        let lastContent = '';
+        for (let round = 0; round < 8; round++) {
+          svc.setModel(lockedModel);
+          this.messages = this.sanitizeMessages(this.messages);
+          // Sem tools nos últimos 2 rounds → forçar resposta texto
+          const useTools = round < 6 ? selectedTools : undefined;
+          const response = await svc.chat(this.messages, useTools as any);
+
+          if (response.content) {
+            response.content = cleanModelGarbage(response.content);
+          }
+
+          this.messages.push(response);
+
+          if (response.content) {
+            lastContent = response.content;
+            smartOutput(response.content, 'TEXT');
+          }
+
+          if (response.tool_calls?.length) {
+            const results = await Promise.all(response.tool_calls.map(async (tc: any) => {
+              const handler = this.allHandlers[tc.function.name];
+              const args = safeJSONParse(tc.function.arguments);
+              console.log(chalk.hex('#005500')(`  [tool] ${tc.function.name}`));
+              const result = handler ? await handler(args) : 'Tool não encontrada.';
+              return { role: 'tool' as const, tool_call_id: tc.id, content: truncateToolOutput(String(result)) };
+            }));
+            this.messages.push(...results);
+            continue;
+          }
+
+          // Tem texto → pronto
+          if (lastContent) break;
+        }
+
+        // Se ainda não tem texto, força uma última chamada sem tools
+        if (!lastContent) {
+          svc.setModel(lockedModel);
+          this.messages = this.sanitizeMessages(this.messages);
+          this.messages.push({ role: 'system', content: 'Responda ao usuário em texto. NÃO use tools. Resuma o resultado das ações executadas.' });
+          const final = await svc.chat(this.messages, undefined);
+          if (final.content) {
+            final.content = cleanModelGarbage(final.content);
+            lastContent = final.content;
+            smartOutput(final.content, 'TEXT');
+          }
+          this.messages.push(final);
+        }
+
+        this.showFooter();
+        return lastContent || '✅ Executado.';
+      } catch (e: any) {
+        const msg = e.message || String(e);
+        console.log(chalk.red(`  [TG erro] ${msg}`));
+        if (msg.includes('429')) return '⚠️ Rate limit. Tente novamente em alguns segundos.';
+        return `❌ Erro: ${msg}`;
       }
+    }, true);
 
-      return response.content || 'Sem resposta.';
-    });
-
-    await this.telegramBot.start();
+    this.telegramBot.start();
   }
 
   private showUsage() {
@@ -1197,9 +1303,9 @@ cwd: ${process.cwd()}` },
           }
         }
 
-        // Limpa tokens especiais de modelos locais
+        // Limpa tokens especiais e markup DSML de modelos que vazam
         if (response.content) {
-          response.content = response.content.replace(/<\|im_start\|>|<\|im_end\|>|<\|endoftext\|>|<s>|<\/s>/g, '').trim();
+          response.content = cleanModelGarbage(response.content);
         }
 
         if (!response || (!response.content && !response.tool_calls?.length)) {

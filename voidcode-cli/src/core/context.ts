@@ -104,7 +104,8 @@ function detectGitCompact(cwd: string): string {
     const gitDir = findFileUp('.git', cwd);
     if (!gitDir) return '';
     const { execSync } = require('child_process');
-    const branch = execSync('git branch --show-current 2>/dev/null', { encoding: 'utf-8', cwd, timeout: 2000 }).trim();
+    const devNull = process.platform === 'win32' ? '2>NUL' : '2>/dev/null';
+    const branch = execSync(`git branch --show-current ${devNull}`, { encoding: 'utf-8', cwd, timeout: 2000 }).trim();
     return branch ? `git:${branch}` : '';
   } catch { return ''; }
 }

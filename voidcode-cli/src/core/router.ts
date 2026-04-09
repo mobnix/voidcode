@@ -1,4 +1,6 @@
-// Router inteligente: classifica tarefa e seleciona melhor provider
+// Router inteligente: classifica tarefa e seleciona melhor provider + modelo
+
+import { getProvider, type Capability } from './providers.js';
 
 export type TaskType = 'code' | 'reasoning' | 'quick' | 'sub_agent';
 
@@ -8,6 +10,14 @@ const ROUTING_TABLE: Record<TaskType, string[]> = {
   reasoning:  ['gemini', 'openai', 'deepseek', 'groq', 'qwen'],
   quick:      ['groq', 'gemini', 'deepseek', 'qwen', 'openai', 'ollama'],
   sub_agent:  ['deepseek', 'groq', 'gemini', 'qwen', 'huggingface', 'ollama'],
+};
+
+// Qual capability importa mais pra cada tipo de tarefa
+const TASK_CAPABILITY: Record<TaskType, Capability> = {
+  code: 'code',
+  reasoning: 'reasoning',
+  quick: 'fast',
+  sub_agent: 'code',
 };
 
 // Padrões para classificação
@@ -54,8 +64,26 @@ export function selectModel(taskType: TaskType, availableProviders: string[]): s
   for (const p of prefs) {
     if (availableProviders.includes(p)) return p;
   }
-  // Fallback: primeiro disponível
   return availableProviders[0] || 'deepseek';
+}
+
+/**
+ * Seleciona o melhor modelo de um provider para o tipo de tarefa.
+ * Ex: deepseek → deepseek-chat (code) ou deepseek-reasoner (reasoning)
+ *     gemini  → gemini-2.5-flash (quick) ou gemini-2.5-pro (reasoning)
+ */
+export function selectBestModel(providerId: string, taskType: TaskType, currentModel: string): string {
+  const provider = getProvider(providerId);
+  if (!provider || provider.models.length <= 1) return currentModel;
+
+  const needed = TASK_CAPABILITY[taskType];
+
+  // Procura modelo com a capability ideal
+  const ideal = provider.models.find(m => m.capabilities.includes(needed));
+  if (ideal) return ideal.id;
+
+  // Fallback: modelo atual
+  return currentModel;
 }
 
 // Detecta override explícito do user: @deepseek, @gemini, etc.

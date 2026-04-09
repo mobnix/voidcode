@@ -4,6 +4,7 @@ import path from 'node:path';
 import { logger, splashScreen } from '../utils/ui.js';
 import { PROVIDERS } from '../core/providers.js';
 import { saveConfig } from '../core/deepseek.js';
+import { openGoogleAIStudio } from '../core/google-auth.js';
 import chalk from 'chalk';
 import axios from 'axios';
 
@@ -15,10 +16,39 @@ function ask(question: string, defaultVal?: string): Promise<string> {
     rl.on('close', () => done(defaultVal || ''));
     const suffix = defaultVal ? chalk.dim(` [${defaultVal}]`) : '';
     rl.question(chalk.hex('#00FF41')(question) + suffix + ' ', (answer) => {
-      rl.close();
       done(answer?.trim() || defaultVal || '');
+      rl.close();
     });
   });
+}
+
+async function waitForTelegramMessage(botBase: string, timeout: number): Promise<number | null> {
+  const start = Date.now();
+  let offset = 0;
+
+  // Limpa updates antigos primeiro
+  try {
+    const old = await axios.get(`${botBase}/getUpdates`, { params: { offset: -1 }, timeout: 5000 });
+    if (old.data.ok && old.data.result.length > 0) {
+      offset = old.data.result[old.data.result.length - 1].update_id + 1;
+    }
+  } catch { /* ok */ }
+
+  while (Date.now() - start < timeout) {
+    try {
+      const res = await axios.get(`${botBase}/getUpdates`, {
+        params: { offset, timeout: 5, limit: 1 },
+        timeout: 10000,
+      });
+      if (res.data.ok && res.data.result.length > 0) {
+        const update = res.data.result[0];
+        if (update.message?.chat?.id) {
+          return update.message.chat.id;
+        }
+      }
+    } catch { /* retry */ }
+  }
+  return null;
 }
 
 export async function runConfigWizard(voidcodeHome: string): Promise<boolean> {
@@ -40,7 +70,7 @@ export async function runConfigWizard(voidcodeHome: string): Promise<boolean> {
   });
   console.log();
 
-  const providerChoice = await ask('Provider (1-5):', '1');
+  const providerChoice = await ask(`Provider (1-${PROVIDERS.length}):`, '1');
   const idx = Math.max(0, Math.min(parseInt(providerChoice) - 1, PROVIDERS.length - 1));
   const provider = PROVIDERS[idx]!;
 
@@ -50,8 +80,21 @@ export async function runConfigWizard(voidcodeHome: string): Promise<boolean> {
     if (!baseURL) { logger.error('URL necessária.'); return false; }
   }
 
-  const apiKey = await ask(`${provider.name} API Key:`);
-  if (!apiKey || apiKey.length < 5) {
+  let apiKey = '';
+
+  if (provider.id === 'gemini') {
+    // Abre Google AI Studio automaticamente
+    logger.info('Abrindo Google AI Studio no navegador...');
+    console.log(chalk.hex('#005500')('  Faça login com sua conta Google e copie a API Key.\n'));
+    openGoogleAIStudio();
+    apiKey = await ask('Cole a API Key:');
+  } else if (provider.id === 'ollama') {
+    apiKey = 'ollama';
+  } else {
+    apiKey = await ask(`Insira sua API Key (${provider.name}):`);
+  }
+
+  if (provider.id !== 'ollama' && (!apiKey || apiKey.length < 5)) {
     logger.error('Key inválida.');
     return false;
   }
@@ -94,13 +137,29 @@ export async function runConfigWizard(voidcodeHome: string): Promise<boolean> {
     const token = await ask('Bot Token do @BotFather:');
 
     if (token && token.length > 20) {
-      // Valida token
       try {
-        const res = await axios.get(`https://api.telegram.org/bot${token}/getMe`, { timeout: 5000 });
+        const botBase = `https://api.telegram.org/bot${token}`;
+        const res = await axios.get(`${botBase}/getMe`, { timeout: 5000 });
         if (res.data.ok) {
+          const botUsername = res.data.result.username;
           saveConfig({ envKey: 'TELEGRAM_BOT_TOKEN', apiKey: token });
-          logger.success(`Telegram bot @${res.data.result.username} configurado!`);
-          logger.info('Use /telegram no VoidCode para ativar.');
+          logger.success(`Bot @${botUsername} validado!`);
+          console.log(chalk.hex('#008F11')(`\n  Agora mande qualquer mensagem para @${botUsername} no Telegram.`));
+          logger.info('Aguardando sua mensagem...\n');
+
+          // Espera o usuário mandar uma mensagem pro bot (timeout 60s)
+          const chatId = await waitForTelegramMessage(botBase, 60_000);
+          if (chatId) {
+            saveConfig({ envKey: 'TELEGRAM_CHAT_ID', apiKey: String(chatId) });
+            await axios.post(`${botBase}/sendMessage`, {
+              chat_id: chatId,
+              text: '🟢 *VoidCode conectado!*\n\nSeu bot está pronto. Envie comandos aqui como se estivesse no terminal.\n\n`/status` — ver status\n`/stop` — desconectar',
+              parse_mode: 'Markdown'
+            }, { timeout: 10000 });
+            logger.success('Mensagem de confirmação enviada no Telegram!');
+          } else {
+            logger.warn('Timeout — nenhuma mensagem recebida. Configure depois com /telegram.');
+          }
         } else {
           logger.error('Token inválido.');
         }

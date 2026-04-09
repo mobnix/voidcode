@@ -1,6 +1,6 @@
 import { LLMService, type TokenUsage, type LLMServiceConfig } from './llm-service.js';
 import { PROVIDERS, getProvider, type Provider } from './providers.js';
-import { classifyTask, selectModel, type TaskType } from './router.js';
+import { classifyTask, selectModel, selectBestModel, type TaskType } from './router.js';
 
 export class LLMPool {
   private connections = new Map<string, LLMService>();
@@ -100,19 +100,32 @@ export class LLMPool {
     return this.connections.get(pick) || this.getDefault();
   }
 
-  getForMessage(message: string): { service: LLMService; taskType: TaskType; routed: boolean } {
+  getForMessage(message: string): { service: LLMService; taskType: TaskType; routed: boolean; modelSwitch?: string } {
     const taskType = classifyTask(message);
     const available = this.getAvailableIds();
 
+    let service: LLMService;
+    let routed = false;
+    let modelSwitch: string | undefined;
+
     if (available.length <= 1) {
-      const svc = available.length === 1 ? this.connections.get(available[0]!)! : this.getDefault();
-      return { service: svc, taskType, routed: available.length === 1 && available[0] !== this._defaultProvider };
+      service = available.length === 1 ? this.connections.get(available[0]!)! : this.getDefault();
+      routed = available.length === 1 && available[0] !== this._defaultProvider;
+    } else {
+      const pick = selectModel(taskType, available);
+      service = this.connections.get(pick) || this.getDefault();
+      routed = pick !== this._defaultProvider;
     }
 
-    const pick = selectModel(taskType, available);
-    const service = this.connections.get(pick) || this.getDefault();
-    const routed = pick !== this._defaultProvider;
-    return { service, taskType, routed };
+    // Troca de modelo dentro do mesmo provider se necessário
+    const bestModel = selectBestModel(service.provider, taskType, service.modelName);
+    if (bestModel !== service.modelName) {
+      const prevModel = service.modelName;
+      service.setModel(bestModel);
+      modelSwitch = `${prevModel} → ${bestModel}`;
+    }
+
+    return { service, taskType, routed, modelSwitch };
   }
 
   // --- Mutations ---

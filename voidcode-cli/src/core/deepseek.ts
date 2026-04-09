@@ -57,14 +57,3 @@ export function removeConfigKey(envKey: string) {
   delete process.env[envKey];
 }
 
-// Backward compat: DeepSeekService = LLMService com config do env
-export class DeepSeekService extends LLMService {
-  constructor() {
-    super(loadConfig());
-  }
-
-  reconnect(apiKey: string, baseURL: string, model: string, provider: string) {
-    // Cria nova instância internamente — para compat com código antigo
-    Object.assign(this, new LLMService({ provider, apiKey, baseURL, model }));
-  }
-}

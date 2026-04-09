@@ -185,8 +185,9 @@ export const toolHandlers: Record<string, (args: any) => any> = {
       if (!content.includes(old_string)) {
         return `Erro: String original não encontrada no arquivo.`;
       }
-      fs.writeFileSync(fullPath, content.replace(old_string, new_string));
-      return `Substituição realizada em ${filePath}.`;
+      fs.writeFileSync(fullPath, content.replaceAll(old_string, new_string));
+      const count = content.split(old_string).length - 1;
+      return `Substituição realizada em ${filePath} (${count} ocorrência${count > 1 ? 's' : ''}).`;
     } catch (e: any) {
       return `Erro: ${e.message}`;
     }
@@ -196,8 +197,9 @@ export const toolHandlers: Record<string, (args: any) => any> = {
     if (background) {
       return new Promise<string>((resolve) => {
         try {
-          const child = spawn('bash', ['-c', command], {
-            detached: true,
+          const isWin = process.platform === 'win32';
+          const child = spawn(isWin ? 'cmd.exe' : 'bash', isWin ? ['/c', command] : ['-c', command], {
+            detached: !isWin,
             stdio: ['ignore', 'pipe', 'pipe']
           });
 
@@ -231,7 +233,9 @@ export const toolHandlers: Record<string, (args: any) => any> = {
             if (portMatch) {
               const port = portMatch[1];
               try {
-                execSync(`curl -s -o /dev/null -w "%{http_code}" http://localhost:${port} 2>/dev/null`, {
+                const devNull = process.platform === 'win32' ? 'NUL' : '/dev/null';
+                const devNull2 = process.platform === 'win32' ? '2>NUL' : '2>/dev/null';
+                execSync(`curl -s -o ${devNull} -w "%{http_code}" http://localhost:${port} ${devNull2}`, {
                   encoding: 'utf-8', timeout: 2000
                 });
                 resolve(`Servidor rodando em background (PID: ${child.pid}).\nhttp://localhost:${port} respondendo.\n${stdout ? 'Output: ' + stdout.substring(0, 300) : ''}`);
